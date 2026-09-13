@@ -273,3 +273,34 @@ downloaded signed-installer test remain necessary before a signed public release
 - Not reproduced here: the preview reported out of its box. Measured at twelve
   window size and zoom combinations, the box stayed inside the frame every time,
   so the change above targets the remaining suspect, the pixel-ratio conversion.
+
+## beta.15 preview offset, scene editing off air, tolerant window source (2026-09-13)
+
+- Root cause of the preview leaving its box, reproduced with a throwaway
+  Electron window: with an application menu, Electron draws the menu bar inside
+  the window's client area (26 px at 100%), and getContentSize() /
+  Chrome_RenderWidgetHostHWND start below it, while the native child was
+  positioned against the client-area origin. Every preview test used
+  setMenu(null), so the offset never showed. The engine now takes the page
+  origin from Chrome_RenderWidgetHostHWND (fallback: client size minus the
+  DIP content size the host sends with resize) and shifts the preview by it;
+  the self-test covers the content-size arithmetic at 100% and 150%.
+- The renderer keeps two scene ids: the scene on air (engine composition,
+  layout activeScene) and the scene being edited (Fontes dock, source dialog,
+  scene dialog). A select "Cena em edição" in the Fontes dock switches the
+  edited scene; a new scene opens edited and off air. Layout smoke asserts that
+  creating and editing an off-air scene sends nothing to the engine, is saved
+  for that scene, and that clicking a scene still puts it on air.
+- A window source that has not delivered frames after three seconds joins the
+  scene instead of failing it (camera and display are still required); the dock
+  shows "aguardando a janela" with an explanation. The legacy game source
+  explains the any-fullscreen requirement (a 4:3 window smaller than the
+  monitor is never detected) and left the empty-scene quick-add list.
+- 80 Node tests, engine self-test, protocol test, layout smoke, UI smoke and
+  native preview smoke pass. Packaged app 648456645 bytes over 1000 files.
+- Installer 307547716 bytes, SHA-256
+  6c058175e9d09330002b731198b57f2213bb3d89e9ea62ec25ab70fb87419fcd, unsigned
+  beta. Publication (copy to the download folder, signed manifest) is done by
+  the owner with the prepared script.
+- Not validated here: the preview inside the installed app on a screen with
+  scaling other than 100%, and a real game window (this server has no game GPU).

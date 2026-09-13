@@ -97,7 +97,21 @@ app.whenReady().then(async()=>{let win;try{
  await clickText('button','Abrir prévia');await delay(100);state={...state,prepared:true};win.webContents.send('studio:state',state);await delay(100);
  state={...state,studio:{session:{id,status:'reserved',managed_by_device:true}}};win.webContents.send('studio:state',state);await delay(150);
  await click('[aria-label="Nova cena"]');await delay(100);assert.equal(await js("document.querySelectorAll('.scene-list li').length"),2);
- await delay(600);assert.equal(last('layout.save').payload.scenes.length,2);assert.equal(last('layout.save').payload.scenes[1].layers.length,0,'A new scene starts empty: two scenes never share what the other shows');
+ // A new scene is edited, not put on air: the engine keeps composing the live scene while it is prepared.
+ assert.equal(last('prepare').payload.sceneId,'principal','Creating a scene never switches the scene on air');
+ assert.equal(await js("document.querySelector('.scene-list li.is-active').textContent.includes('Principal')"),true);
+ assert.notEqual(await js("document.querySelector('[aria-label=\"Cena em edição\"]').value"),'principal','The sources dock edits the new scene');
+ assert.equal(await js("document.querySelectorAll('.layer-list li').length"),0,'The sources dock shows the edited scene, which starts empty');
+ assert.ok(await js("document.querySelector('.dock-sources .dock-hint.is-editing').textContent.includes('fora do ar')"),'The dock says the edited scene is not on air');
+ const beforeEdit=calls.filter(c=>c.command==='prepare').length;
+ await click('[aria-label="Adicionar fonte"]');await delay(50);await clickText('.add-panel button','Texto');await delay(700);await click('[aria-label="Fechar ajustes"]');await delay(100);
+ assert.equal(calls.filter(c=>c.command==='prepare').length,beforeEdit,'Editing a scene that is not on air does not touch the engine');
+ assert.equal(await js("document.querySelectorAll('.layer-list li').length"),1);
+ await delay(600);assert.equal(last('layout.save').payload.scenes[1].layers.length,1,'The edit is saved for that scene');
+ await setValue('[aria-label="Cena em edição"]','principal');await delay(100);assert.equal(await js("document.querySelectorAll('.layer-list li').length"),3,'Choosing the scene on air in the dock shows its sources again');
+ await clickText('.scene-button','Cena 2');await delay(700);assert.equal(last('prepare').payload.sceneId,await js("document.querySelector('[aria-label=\"Cena em edição\"]').value"),'Clicking a scene puts it on air and edits it');
+ await clickText('.scene-button','Principal');await delay(700);
+ await delay(600);assert.equal(last('layout.save').payload.scenes.length,2);assert.equal(last('layout.save').payload.scenes[1].layers.length,1,'A new scene starts empty and keeps only what was added to it');
  assert.ok(last('prepare').payload.sceneId,'The scene identity reaches the engine so it can animate the change');
  assert.deepEqual(last('prepare').payload.transition,{style:'slide',durationMs:350},'The scene change carries the chosen animation');
  await clickText('.scene-button','Principal');await delay(300);await click('[aria-label="Editar cena"]');await delay(150);
@@ -115,7 +129,7 @@ app.whenReady().then(async()=>{let win;try{
  await click('[aria-label="Adicionar fonte"]');await delay(120);
  const offered=await js("[...document.querySelectorAll('.add-panel button')].map(b=>b.textContent.trim())");
  assert.deepEqual(offered,['Câmera','Janela / Jogo','Tela inteira','Imagem','Texto'],'One source covers window and game');
- assert.equal(await js("document.querySelector('.dock-sources .dock-hint').textContent.includes('modo janela')"),true,'Adding a source explains how a game must run');
+ assert.equal(await js("[...document.querySelectorAll('.dock-sources .dock-hint')].some(p=>p.textContent.includes('modo janela'))"),true,'Adding a source explains how a game must run');
  await click('[aria-label="Adicionar fonte"]');await delay(120);
  await clickText('.scene-button','Principal');await delay(600);assert.equal(await js("document.querySelector('.scene-list li.is-active').textContent.includes('Principal')"),true);
  await js("[...document.querySelectorAll('[role=tab]')].find(b=>b.textContent.includes('Interações')).click()");await delay(400);

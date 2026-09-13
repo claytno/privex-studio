@@ -1,3 +1,9 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
+#ifndef WINVER
+#define WINVER 0x0A00
+#endif
 #include <windows.h>
 #include <objbase.h>
 #include <tlhelp32.h>
@@ -66,9 +72,12 @@ bool captureKind(const QString &kind) { return kind == "camera" || kind == "wind
 const char *captureType(const QString &kind) { return kind == "camera" ? "dshow_input" : kind == "window" ? "window_capture" : kind == "game" ? "game_capture" : "monitor_capture"; }
 const char *captureProperty(const QString &kind) { return kind == "camera" ? "video_device_id" : kind == "window" || kind == "game" ? "window" : "monitor_id"; }
 const char *anyFullscreen = "any_fullscreen";
-// A camera, window or display should open at once, so it is awaited before it replaces a working scene.
-// A game hook waits for the game to render and may legitimately never deliver, so it is never awaited.
+// A camera or display opens at once, so it is awaited and required before it replaces a working scene.
+// A window is awaited too, but tolerated: a game window that is minimized, still loading or hidden behind
+// another delivers nothing yet, and refusing the scene would leave the streamer stuck on "sem sinal"
+// with no way to apply. A game hook waits for the game to render and is never awaited.
 bool awaitsFrames(const QString &kind) { return captureKind(kind) && kind != "game"; }
+bool requiresFrames(const QString &kind) { return kind == "camera" || kind == "display"; }
 // A screen capture stops delivering whenever the window is minimized, the game drops its hook
 // on alt-tab or the game stops drawing. libobs then reports no size and the canvas turns black.
 // This filter keeps the last frame it saw, so the scene holds the picture instead of going dark.
@@ -198,6 +207,26 @@ PreviewRect previewRectangle(const QJsonObject &bounds,int clientWidth,int clien
  require(left>=0&&top>=0&&right<=clientWidth&&bottom<=clientHeight,"Preview bounds must fit the Studio window");
  return {left,top,right-left,bottom-top};
 }
+// Electron draws its menu bar inside the client area of the window, so the page — whose coordinates the
+// preview bounds use — starts below it. The page's own child window says exactly where; the content size
+// the host reports (device-independent pixels) is the fallback when that window is not there.
+struct PageOrigin { int x = 0, y = 0; };
+PageOrigin contentOffset(int clientWidth,int clientHeight,double contentWidth,double contentHeight,unsigned dpi) {
+ if(!(contentWidth>0&&contentHeight>0&&dpi>0&&std::isfinite(contentWidth)&&std::isfinite(contentHeight)))return {};
+ const int dx=clientWidth-int(std::lround(contentWidth*dpi/96.0)),dy=clientHeight-int(std::lround(contentHeight*dpi/96.0));
+ // A frame smaller than the client area is a menu or toolbar above the page; anything else is a stale size.
+ if(dx<0||dy<0||dx>clientWidth/4||dy>clientHeight/4)return {};
+ return {dx,dy};
+}
+PageOrigin pageOrigin(HWND parent,const RECT &client,const QJsonObject &args) {
+ const int clientWidth=client.right-client.left,clientHeight=client.bottom-client.top;
+ if(HWND page=FindWindowExW(parent,nullptr,L"Chrome_RenderWidgetHostHWND",nullptr)){
+  RECT r{};POINT p{};
+  if(GetWindowRect(page,&r)){p.x=r.left;p.y=r.top;if(ScreenToClient(parent,&p)&&p.x>=0&&p.y>=0&&p.x<=clientWidth/4&&p.y<=clientHeight/4)return {int(p.x),int(p.y)};}
+ }
+ if(args.value("content").isObject()){const auto content=args.value("content").toObject();return contentOffset(clientWidth,clientHeight,content.value("width").toDouble(),content.value("height").toDouble(),GetDpiForWindow(parent));}
+ return {};
+}
 struct Box { int x, y, w, h; uint32_t align; };
 
 struct Engine {
@@ -285,13 +314,14 @@ struct Engine {
   // The published mix, not one scene: the preview shows the transition, the interval and the goal.
   obs_render_main_texture(); gs_projection_pop(); gs_viewport_pop();
  }
- void resize(const QJsonObject &bounds) {
+ void resize(const QJsonObject &bounds,const QJsonObject &args={}) {
   try {
-   RECT client{0,0,32768,32768};
-   if(preview) require(GetClientRect(GetParent(preview),&client),"Preview parent is unavailable");
+   RECT client{0,0,32768,32768};PageOrigin origin;
+   if(preview){require(GetClientRect(GetParent(preview),&client),"Preview parent is unavailable");origin=pageOrigin(GetParent(preview),client,args);}
    else require(!bounds.contains("viewport"),"Preview parent is unavailable");
-   const auto r=previewRectangle(bounds,client.right-client.left,client.bottom-client.top);
-   if(preview){require(SetWindowPos(preview,HWND_TOP,r.x,r.y,r.width,r.height,SWP_NOACTIVATE),"Could not position preview");previewPositioned=true;}
+   // The bounds are page pixels; the page sits at origin inside the client area, and must still fit it.
+   const auto r=previewRectangle(bounds,client.right-client.left-origin.x,client.bottom-client.top-origin.y);
+   if(preview){require(SetWindowPos(preview,HWND_TOP,r.x+origin.x,r.y+origin.y,r.width,r.height,SWP_NOACTIVATE),"Could not position preview");previewPositioned=true;}
    if(display)obs_display_resize(display,r.width,r.height);
   }catch(...){if(preview)ShowWindow(preview,SW_HIDE);previewPositioned=false;throw;}
  }
@@ -307,7 +337,7 @@ struct Engine {
   gs_init_data gd{}; gd.cx = 640; gd.cy = 360; gd.format = GS_BGRA; gd.zsformat = GS_ZS_NONE; gd.window.hwnd = preview;
   display = obs_display_create(&gd, 0x121212); require(display, "Preview graphics creation failed");
   obs_display_add_draw_callback(display, draw, this);
-  if (args.contains("bounds")) resize(args.value("bounds").toObject());
+  if (args.contains("bounds")) resize(args.value("bounds").toObject(), args);
  }
  void clearLayer(std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> &sources) {
   for (auto [source, item] : sources) { if (item) obs_sceneitem_remove(item); if (source) obs_source_release(source); } sources.clear();
@@ -500,7 +530,7 @@ struct Engine {
    }
    if (waitReady) for (auto &layer : next) if (layer.created && layer.awaited) {
     for (int attempt = 0; attempt < 120 && (!obs_source_get_width(layer.source) || !obs_source_get_height(layer.source)); attempt++) Sleep(25);
-    require(obs_source_get_width(layer.source) > 0 && obs_source_get_height(layer.source) > 0, "New video source is not ready; previous sources preserved");
+    if (requiresFrames(layer.spec.value("kind").toString())) require(obs_source_get_width(layer.source) > 0 && obs_source_get_height(layer.source) > 0, "New video source is not ready; previous sources preserved");
    }
   } catch (...) {
    for (auto *s : showing) obs_source_dec_showing(s);
@@ -762,6 +792,10 @@ int testAudioMeters(){
 QJsonObject synthetic(int w, int h, double color, const char *fit = "fit", const char *corner = "br", double size = 0.3) { return {{"kind","synthetic"},{"width",w},{"height",h},{"color",color},{"fit",fit},{"corner",corner},{"size",size}}; }
 int selfTest(Engine &e) {
  require(awaitsFrames("camera") && awaitsFrames("window") && awaitsFrames("display"),"Real devices must be awaited before replacing a scene");
+ require(requiresFrames("camera") && requiresFrames("display") && !requiresFrames("window") && !requiresFrames("game"),"Only a camera or display may refuse a scene for not delivering frames; a game window joins and waits");
+ require(contentOffset(984,661,984,635,96).y==26 && contentOffset(984,661,984,635,96).x==0,"A menu bar above the page must offset the preview by its height");
+ require(contentOffset(1200,900,800,600,144).x==0 && contentOffset(1200,900,800,600,144).y==0,"A page filling the client area at 150% needs no offset");
+ require(contentOffset(1200,900,1200,300,96).y==0 && contentOffset(1200,900,0,0,96).y==0,"A stale or missing content size must not move the preview");
  require(!awaitsFrames("game"),"A game hook must never block a scene change while the game is not rendering");
  require(!awaitsFrames("image") && !awaitsFrames("text") && !awaitsFrames("synthetic"),"Only capture devices are awaited");
  require(holdsLastFrame("game") && holdsLastFrame("window"),"A screen capture must hold its last frame when it stops delivering");
@@ -902,7 +936,7 @@ int main(int argc, char **argv) {
     else if (command == "start") { try { result = engine.start(args); } catch (...) { if (!engine.active()) engine.releaseOutput(); throw; } }
     else if (command == "stop") { engine.releaseOutput(); engine.clearSources(); result = engine.status(); }
     else if (command == "status") result = engine.status();
-    else if (command == "resize") { engine.resize(args.value("bounds").toObject()); result = engine.status(); }
+    else if (command == "resize") { engine.resize(args.value("bounds").toObject(), args); result = engine.status(); }
     else if (command == "preview") { require(args.value("visible").isBool(), "Invalid preview visibility"); if (engine.preview) { const bool visible=args.value("visible").toBool(); require(!visible || engine.previewPositioned,"Position the preview before showing it"); ShowWindow(engine.preview,visible ? SW_SHOWNOACTIVATE : SW_HIDE); } result = engine.status(); }
     else if (command == "mute") { require(args.value("muted").isBool(), "Invalid mute state"); engine.desiredMuted=args.value("muted").toBool(); if (engine.mic) obs_source_set_muted(engine.mic, engine.paused || engine.desiredMuted); result = engine.status(); }
     else if (command == "scene") { engine.setScene(stringArg(args,"mode",16)); result = engine.status(); }
