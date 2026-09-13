@@ -1,0 +1,19 @@
+Privex Studio — avisos de componentes de terceiros
+
+Este aplicativo possui interface e integração Privex. Não é a interface do OBS Studio nem do Streamlabs. A marca Privex não identifica os autores dos componentes abaixo.
+
+Electron / Chromium / Node.js
+As licenças do runtime Electron e dos componentes Chromium estão nos arquivos LICENSE e LICENSES.chromium.html na pasta de instalação. Documentação e fontes oficiais: https://github.com/electron/electron
+
+OBS / libobs
+O motor de mídia utiliza libobs e módulos de captura/saída do projeto OBS. Licença GNU GPL versão 2 ou posterior, conforme libobs-COPYING.txt. O código-fonte correspondente do motor Privex e da base OBS está em resources/source. Fontes oficiais: https://github.com/obsproject/obs-studio
+
+Outras dependências de mídia
+As licenças e informações fornecidas pelos autores acompanham o aplicativo em resources/licenses/obs-deps-2026-07-15-x64 e resources/licenses/obs-deps-qt6-2026-07-15-x64. Os avisos de dependências JavaScript ficam em resources/licenses/frontend. Cada componente continua sujeito à sua licença própria.
+
+Os arquivos de origem das dependências nativas, incluindo FFmpeg, x264, QtCore/qtbase, LAME, librist, SRT e dependências estáticas, acompanham a instalação em resources/source/native-dependencies. INVENTORY.json registra versões, commits e SHA-256; obs-deps-build-recipes.zip contém as configurações Windows e patches da versão 2026-07-15. Os fontes Qt incluem apenas qtbase, pois somente QtCore é distribuído. Os arquivos originais e os patches são separados, para conservar a procedência. Consulte SOURCE-INFO.txt para recompilar e posicionar submódulos. A configuração FFmpeg distribuída habilita GPL e version3; sua licença original COPYING.GPLv3 acompanha os avisos e fontes.
+
+Instalador
+O instalador foi criado com Inno Setup, de Jordan Russell e colaboradores: https://jrsoftware.org/
+
+As condições do serviço Privex não restringem os direitos concedidos pelas licenças desses componentes. ASAR, compilação e assinatura não impedem engenharia reversa e não substituem validação e autorização no servidor.

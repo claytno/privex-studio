@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "description": "Studio client only. No website routes, server, database or private repository history.",
+  "sharedModules": [
+    "shared/components/ui/Button.jsx",
+    "shared/components/ui/Modal.jsx",
+    "shared/hooks/useLivePolling.js",
+    "shared/hooks/useLiveRoomEvents.js",
+    "shared/pages/live/LiveChatPanel.jsx",
+    "shared/pages/live/LiveCommerceStudio.jsx",
+    "shared/pages/live/LiveModerationPanel.jsx",
+    "shared/pages/live/LiveOrdersPanel.jsx",
+    "shared/pages/live/liveCommerceUtils.js"
+  ],
+  "dependencies": [
+    "framer-motion",
+    "lucide-react",
+    "react",
+    "react-dom"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "obs": {"url":"https://github.com/obsproject/obs-studio.git","commit":"ba2f32bdf791005443988a4955e963663e16b1ed","tag":"32.2.2"},
+  "submodules": {
+    "deps/libdshowcapture/src":"8878638324393815512f802640b0d5ce940161f1",
+    "deps/libdshowcapture/src/external/capture-device-support":"fe9630974d47f51bf54826e72fb8b654e620aa93",
+    "plugins/obs-browser":"3f0a2cdf378939ebe3c6f9ab36d4ea100c25aac2",
+    "plugins/obs-websocket":"1ef34bf48110c2a18184e50e41cd0b1a855e2147"
+  },
+  "toolchain":{"cmake":"3.31.6","generator":"Visual Studio 17 2022","msvc":"14.44.35207","sdk":"10.0.26100.0","architecture":"x64","configuration":"RelWithDebInfo"},
+  "archives":[
+    {"name":"windows-deps-2026-07-15-x64.zip","url":"https://github.com/obsproject/obs-deps/releases/download/2026-07-15/windows-deps-2026-07-15-x64.zip","sha256":"6f90e9598fa10cff5ad23cdcfae49b87868c07bf896b02cd464582b4ce2f2ba9"},
+    {"name":"windows-deps-2026-07-15-x86.zip","url":"https://github.com/obsproject/obs-deps/releases/download/2026-07-15/windows-deps-2026-07-15-x86.zip","sha256":"f33697d7e248b53f38893f02440454b91b0aab05c981c646830521335242fd08"},
+    {"name":"windows-deps-qt6-2026-07-15-x64.zip","url":"https://github.com/obsproject/obs-deps/releases/download/2026-07-15/windows-deps-qt6-2026-07-15-x64.zip","sha256":"7c7f985711d80467bdc1795b6592275a27d5b0e5a2c7a61db1f2c1d08d6a5579"}
+  ]
+}

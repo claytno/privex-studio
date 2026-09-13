@@ -1,0 +1,32 @@
+PRIVEX STUDIO — CONDIÇÕES DE USO DO APLICATIVO
+Versão de 12 de setembro de 2026
+
+Leia antes de instalar. Ao selecionar “Eu aceito”, você concorda com estas condições de uso do aplicativo. A instalação não cria uma conta nem inicia uma transmissão.
+
+1. Uso da plataforma
+O Privex Studio permite preparar e administrar transmissões no Privex. O serviço é destinado exclusivamente a pessoas com 18 anos completos ou mais. Para transmitir, sua conta deve estar apta e verificada, conforme as regras e limites exibidos na plataforma.
+
+O uso do serviço continua sujeito aos Termos de Uso e à Política de Privacidade do Privex:
+https://privex.site/terms
+https://privex.site/privacy
+
+2. Sua conta e sua transmissão
+Conecte somente uma conta que você esteja autorizado a utilizar. Confira a conta, a câmera, o microfone, a janela ou tela selecionada e o conteúdo da prévia antes de iniciar. Você é responsável por possuir as autorizações necessárias para o conteúdo que transmite, inclusive das pessoas retratadas. Não transmita dados pessoais, conversas ou documentos de terceiros sem autorização.
+
+O aplicativo não deve ser utilizado para fraude, invasão de contas, evasão de restrições ou publicação de conteúdo proibido pelos termos da plataforma. Não há promessa de audiência, renda ou disponibilidade ininterrupta.
+
+3. Permissões e dados locais
+O aplicativo utiliza os dispositivos e fontes que você selecionar para preparar a transmissão. A entrada na conta é autorizada no domínio oficial privex.site. O Studio guarda uma credencial de dispositivo protegida pelo Windows e preferências locais. Não compartilhe acesso ao seu usuário do Windows. Ao deixar de usar um computador, desconecte sua conta e revogue o dispositivo no Privex.
+
+Desinstalar o aplicativo remove a credencial local deste aplicativo, mas não exclui a conta, publicações ou registros financeiros na plataforma. Preferências locais podem permanecer. Desconecte a conta antes da desinstalação ou revogue o dispositivo no site para invalidar também sua autorização no servidor. Solicitações relativas à conta e aos dados podem ser enviadas ao contato abaixo.
+
+4. Transações e funcionamento
+Valores, limites, permissões e resultados de interações são determinados pelo servidor da plataforma. A instalação não autoriza débitos. Antes de usar os recursos financeiros, confira as condições apresentadas no serviço. A compatibilidade e a qualidade da transmissão dependem também dos dispositivos, do Windows, dos drivers e da conexão de internet.
+
+5. Componentes de terceiros
+O aplicativo inclui componentes de terceiros com suas próprias licenças. As condições deste documento não limitam direitos concedidos por essas licenças, inclusive acesso ao código-fonte, modificação e redistribuição quando aplicáveis. Consulte os avisos e materiais correspondentes incluídos na instalação. A marca e os serviços Privex não são fornecidos por esses terceiros.
+
+6. Atualizações e direitos
+O código deste cliente é disponibilizado sob GPL-3.0-or-later; você pode estudar, modificar e redistribuir o programa conforme essa licença. As condições de acesso ao serviço Privex não limitam esses direitos sobre o software. Versões modificadas não devem ser apresentadas como versões oficiais. Estas condições não afastam direitos obrigatórios previstos em lei. Mudanças relevantes nas condições de uso do serviço serão comunicadas pela plataforma.
+
+Contato: contato@privex.site

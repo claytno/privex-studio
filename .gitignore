@@ -1,0 +1,15 @@
+/node_modules/
+/build/
+/ui/
+/deps/
+/test-results/
+/oss-build-draft/
+.env*
+*.pfx
+*.p12
+*.key
+*.dpapi*
+*.dmp
+*.pdb
+*.log
+*.tmp

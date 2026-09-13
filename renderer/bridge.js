@@ -1,0 +1,1 @@
+export async function invoke(name,data){const result=await window.privex.invoke(name,data);if(!result.ok){const e=new Error(result.error||'Não foi possível concluir.');e.response={status:result.status,data:{message:e.message}};throw e;}return result.data;}

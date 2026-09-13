@@ -1,0 +1,28 @@
+#include <winres.h>
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @STUDIO_VERSION_MAJOR@,@STUDIO_VERSION_MINOR@,@STUDIO_VERSION_PATCH@,0
+ PRODUCTVERSION @STUDIO_VERSION_MAJOR@,@STUDIO_VERSION_MINOR@,@STUDIO_VERSION_PATCH@,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "Privex Studio project\0"
+   VALUE "FileDescription", "Privex Studio media engine\0"
+   VALUE "FileVersion", "@STUDIO_VERSION@\0"
+   VALUE "InternalName", "PrivexStudioEngine\0"
+   VALUE "OriginalFilename", "PrivexStudioEngine.exe\0"
+   VALUE "ProductName", "Privex Studio\0"
+   VALUE "ProductVersion", "@STUDIO_VERSION@\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
