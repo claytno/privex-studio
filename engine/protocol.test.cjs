@@ -11,6 +11,9 @@ assert.ok(syntheticResult.validOverlayFrames > 5);
 assert.equal(syntheticResult.pauseRestoresMute, true);
 assert.equal(syntheticResult.reconnectionStateChecks, 5);
 assert.equal(syntheticResult.sourceSwitchAndAudioChecks, 7);
+assert.equal(syntheticResult.layerCompositionChecks, 4);
+assert.ok(syntheticResult.validCornerFrames > 5);
+assert.ok(syntheticResult.validHiddenFrames > 5);
 assert.equal(syntheticResult.audioMeterChecks, 8);
 assert.equal(syntheticResult.h264AndAacAvailable, true);
 assert.equal(syntheticResult.networkUsed, false);
@@ -32,6 +35,21 @@ async function protocol() {
   for (const type of ['cameras','microphones','desktops','displays','windows']) assert.ok(Array.isArray(devices.result[type]));
   assert.equal((await call('prepare', {sourceType:'camera',cameraId:'missing-device'})).ok, false);
   assert.equal((await call('status')).result.prepared, false);
+  assert.equal((await call('prepare', {layers:[]})).ok, false);
+  assert.equal((await call('prepare', {layers:[{kind:'image',file:'C:/missing/privex-missing.png'}]})).ok, false, 'Missing image must be refused');
+  assert.equal((await call('prepare', {layers:[{kind:'text',text:'   '}]})).ok, false, 'Blank text must be refused');
+  assert.equal((await call('layer', {index:0,visible:false})).ok, false, 'Layer toggles need prepared capture');
+  // A text-only scene composes without any camera, window or screen capture and no preview window.
+  const textScene = await call('prepare', {layers:[{kind:'text',text:'Voltamos já',fit:'corner',corner:'tl',size:0.4},{kind:'text',text:'Privex'}],width:1280,height:720,fps:30});
+  assert.equal(textScene.ok, true, JSON.stringify(textScene)); assert.equal(textScene.result.prepared, true); assert.equal(textScene.result.layers.length, 2);
+  let composed = textScene.result; for (let attempt = 0; attempt < 40 && !composed.layers[0].ready; attempt++) { await new Promise(r => setTimeout(r, 100)); composed = (await call('status')).result; }
+  assert.equal(composed.layers[0].ready, true, 'Text layers render on the GPU without any capture device'); assert.ok(composed.sourceWidth > 0);
+  assert.equal((await call('layer', {index:1,visible:false})).result.layers[1].visible, false);
+  assert.equal((await call('layer', {index:2,visible:false})).ok, false);
+  assert.equal((await call('reconfigure', {layers:[{kind:'text',text:'Trocado'}],width:1280,height:720,fps:30,microphoneId:'',desktopId:''})).result.layers.length, 1);
+  assert.equal((await call('reconfigure', {layers:[{kind:'camera',id:'missing-device'}],width:1280,height:720,fps:30})).ok, false, 'Unavailable device preserves the composition');
+  assert.equal((await call('status')).result.layers.length, 1);
+  assert.equal((await call('stop')).result.prepared, false);
   assert.equal((await call('mute', {muted:'yes'})).ok, false);
   assert.equal((await call('mute', {muted:true})).ok, true);
   assert.equal((await call('stop')).result.state, 'idle');
@@ -40,7 +58,7 @@ async function protocol() {
   const timeout = setTimeout(() => child.kill(), 10000);
   assert.equal(await exited, 0); clearTimeout(timeout);
   assert.equal(stderr, '');
-  process.stdout.write(JSON.stringify({ok:true,synthetic:syntheticResult,protocolChecks:12,deviceEnumeration:true,eofCleanup:true,networkPublish:false})+'\n');
+  process.stdout.write(JSON.stringify({ok:true,synthetic:syntheticResult,protocolChecks:22,deviceEnumeration:true,eofCleanup:true,networkPublish:false})+'\n');
  } finally { child.kill(); }
 }
 protocol().catch(error => { console.error(error.message); process.exitCode = 1; });

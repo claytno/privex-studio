@@ -1,14 +1,16 @@
 # Privex Studio
 
 Open-source Windows broadcasting client for the Privex service. Connect your
-account in your browser, explicitly confirm the account in Studio, choose your
-camera/window/screen and microphone, preview, then start your broadcast.
+account in your browser, explicitly confirm the account in Studio, build a scene
+from camera, window, screen, image and text sources, choose the microphone,
+preview, then start your broadcast. Scenes are saved per computer.
 Chat, moderation, goals and paid interactions use the authenticated service API.
 The Privex service is age-restricted and broadcasting requires an eligible,
 verified adult account. Building the client does not grant access to that service.
 
-**Status:** beta. The last production installer is 0.2.0-beta.3 and is unsigned.
-This repository prepares 0.2.0-beta.4. SignPath Foundation approval and Windows
+**Status:** beta. The last production installer is 0.2.0-beta.5 and is unsigned.
+This repository prepares 0.2.0-beta.6 (scenes with several sources, compact
+studio layout). SignPath Foundation approval and Windows
 publisher signing have not been obtained. Do not describe this build as signed
 or guaranteed to run with Smart App Control enabled.
 

@@ -63,3 +63,28 @@ downloaded signed-installer test remain necessary before a signed public release
   mute semantics; IPC tests reject extra sample/device data and stale events after
   stopping. These meters measure individual sources, not final mixed-output
   clipping. Real device sensitivity and loopback/echo still require hardware QA.
+
+## Scenes and compact studio revision (beta.6 working tree)
+
+- 63 Node tests pass, including layer validation and the image allowlist, layer
+  toggles bounded to the prepared composition, saved-layout round-trip with a
+  vanished image dropped rather than replaced, and rejected layouts leaving the
+  previous one untouched.
+- Native wrapper rebuilt locally from this tree. Self-test on the GPU: fit,
+  pause and goal frames as before, plus corner-layer frames, hidden-layer frames,
+  source reuse across recompositions and rejection of an invalid layer list
+  (four layer checks). Protocol test: 22 checks including a text-only scene with
+  no capture device, layer toggling, live reconfiguration and preservation when a
+  device is unavailable. No network publish or physical capture.
+- Electron layout test at 1000x720, 1280x800, 1440x940/125% and 1920x1080/150%:
+  preview keeps the 16:9 (or 9:16) canvas ratio, docks and control bar fit
+  without scrolling, discovery never starts capture, Abrir prévia is the only
+  capture consent, adding/positioning sources while the preview is open applies
+  automatically, visibility uses the layer command, images come only from the
+  native picker, new scenes copy the current one and layouts are persisted.
+  Dialog and clipped-scroll preview hiding still pass.
+- Native preview smoke with the layered engine: synthetic own window captured at
+  404x261 into the 640x360 child, PrintWindow colours verified, hide/restore,
+  resize, pause/resume and release on stop.
+- Not validated: physical camera over a shared screen, real image files chosen by
+  a person, prolonged broadcasts with scene switching, and the installer build.

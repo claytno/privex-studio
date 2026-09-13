@@ -1,7 +1,8 @@
 'use strict';
 const {app,BrowserWindow,ipcMain,shell,safeStorage,dialog,Menu,protocol,net,powerMonitor}=require('electron');
 const fs=require('node:fs/promises');const path=require('node:path');const {pathToFileURL}=require('node:url');const crypto=require('node:crypto');
-const {Engine}=require('./engine.cjs');const {ORIGIN,managerRoute,verificationURL,prepareInput,audioInput}=require('./security.cjs');
+const {Engine}=require('./engine.cjs');const {ORIGIN,managerRoute,verificationURL,prepareInput,audioInput,IMAGE_EXTENSIONS}=require('./security.cjs');
+const {defaultLayout,layoutInput,loadLayout,saveLayout,imageUsable}=require('./studio-layout.cjs');
 const {checkForUpdates}=require('./updates.cjs');
 const {normalizeAudioMeters}=require('./audio-meter.cjs');
 const {loadUpdatePreferences,saveUpdatePreferences}=require('./update-preferences.cjs');
@@ -15,8 +16,10 @@ let win,engine,token='',authorization=null,user=null,studio=null,prepared=false,
 let notice='',failure='',uiAlive=Date.now(),credentialsFile,mediaConfig=null,muted=false,sceneMode='live',overlayEnabled=false,goal=null,mediaStatus=null,updateInfo=null,endRequested=false,pendingAccount=null,updateChecking=false,updateController=null,previewRevision=0;
 let automaticUpdateChecks=true,updatePreferencesFile;
 let microphoneVolume=100,desktopVolume=100,audioMeters=normalizeAudioMeters();
+// Scenes/sources saved for this computer; image paths are accepted only after the native picker or the loader verified them.
+let layout=defaultLayout(),layoutFile,allowedImages=new Set();
 const active=()=>studio?.session?.managed_by_device&&['waiting','reserved','starting','live','reconnecting','ending'].includes(studio.session.status);
-const snapshot=()=>({version:app.getVersion(),user,pendingAccount,studio,prepared,transmitting,canvasPortrait:!!mediaConfig&&mediaConfig.height>mediaConfig.width,microphoneVolume,desktopVolume,audioMeters,muted:sceneMode==='pause'||muted,sceneMode,overlayEnabled,mediaStatus,automaticUpdateChecks,updateInfo:updateInfo?{available:updateInfo.available,latestVersion:updateInfo.latestVersion,status:updateInfo.status,progress:updateInfo.progress}:null,busy,notice,error:failure,authorization:authorization?{code:authorization.user_code,expiresAt:authorization.expiresAt}:null});
+const snapshot=()=>({version:app.getVersion(),user,pendingAccount,studio,prepared,transmitting,canvasPortrait:!!mediaConfig&&mediaConfig.height>mediaConfig.width,microphoneVolume,desktopVolume,audioMeters,layout,muted:sceneMode==='pause'||muted,sceneMode,overlayEnabled,mediaStatus,automaticUpdateChecks,updateInfo:updateInfo?{available:updateInfo.available,latestVersion:updateInfo.latestVersion,status:updateInfo.status,progress:updateInfo.progress}:null,busy,notice,error:failure,authorization:authorization?{code:authorization.user_code,expiresAt:authorization.expiresAt}:null});
 function emit(){if(win&&!win.isDestroyed())win.webContents.send('studio:state',snapshot());}
 async function api(method,route,body,authenticated=true){
   if(authenticated&&!token)throw new Error('Entre com sua conta.');
@@ -26,6 +29,7 @@ async function api(method,route,body,authenticated=true){
   if(!response.ok){const e=new Error(data.message||'Não foi possível concluir a operação.');e.status=response.status;e.code=data.error;throw e;}return data;
 }
 async function persist(){if(!safeStorage.isEncryptionAvailable()){notice='Login válido nesta execução. O armazenamento protegido está indisponível.';return;}await fs.mkdir(path.dirname(credentialsFile),{recursive:true});const temp=credentialsFile+'.tmp';await fs.writeFile(temp,safeStorage.encryptString(token));await fs.rename(temp,credentialsFile);}
+async function persistLayout(next){await saveLayout(layoutFile,next);}
 async function clearCredentials(){token='';user=null;pendingAccount=null;authorization=null;await fs.rm(credentialsFile,{force:true});await fs.rm(credentialsFile+'.tmp',{force:true});}
 async function identifyAccount(){const identity=(await api('GET','/obs/v1/me')).user;if(!Number.isSafeInteger(identity?.id)||typeof identity.username!=='string')throw new Error('Conta inválida.');pendingAccount={id:identity.id,username:identity.username,name:identity.name};user=null;studio=null;notice='Confira a conta antes de continuar. Nenhuma câmera ou transmissão foi iniciada.';}
 const updateBlocked=()=>transmitting||endRequested||['waiting','reserved','starting','live','reconnecting','ending'].includes(studio?.session?.status);
@@ -64,7 +68,7 @@ async function endSession(){endRequested=true;epoch++;await stopLocal();if(activ
 async function mediaEvent(value){
   if(value.event==='audio-levels'){if(prepared){audioMeters=normalizeAudioMeters(value.channels);if(win&&!win.isDestroyed())win.webContents.send('studio:audio-levels',audioMeters);}return;}
   if(value.event!=='status')return;
-  mediaStatus={state:value.state,width:value.width,height:value.height,fps:value.fps,totalBytes:value.totalBytes,droppedFrames:value.droppedFrames};
+  mediaStatus={state:value.state,width:value.width,height:value.height,fps:value.fps,totalBytes:value.totalBytes,droppedFrames:value.droppedFrames,layers:Array.isArray(value.layers)?value.layers.map(layer=>({kind:String(layer?.kind??''),ready:layer?.ready===true,visible:layer?.visible!==false})):[]};
   // A failed TLS/network/encoder start is terminal. A recoverable reconnect is not.
   if(transmitting&&Number.isInteger(value.stopCode)&&['ready','idle'].includes(value.state)){
     try{await endSession();}catch{notice='O envio foi interrompido. Vamos tentar finalizar a sessão no servidor novamente.';}
@@ -93,10 +97,12 @@ async function tick(){if(heartbeatBusy||busy)return;heartbeatBusy=true;const tic
 }catch(e){failure=e.status===401?'Sua autorização expirou ou foi revogada. Entre novamente.':'Não foi possível atualizar o servidor. Verifique sua conexão.';if(e.status===401){await stopLocal();await clearCredentials();studio=null;}if(transmitting&&Date.now()-lastControl>30000)await stopLocal();}finally{heartbeatBusy=false;emit();}}
 async function command(name,data){
   if(name==='snapshot'){uiAlive=Date.now();return snapshot();}
-  if(['start','resume','mute','volume','scene','overlay'].includes(name)&&!user)throw new Error('Confirme a conta antes de usar o Studio.');
+  if(['start','resume','mute','volume','scene','overlay','layer','layout.save','image.pick'].includes(name)&&!user)throw new Error('Confirme a conta antes de usar o Studio.');
   if(name==='manager'){if(!user||!active()&&!studio?.session?.managed_by_device)throw new Error('Abra uma sessão deste computador.');const route=managerRoute(data?.method,data?.path,studio.session.id);if(JSON.stringify(data?.body||{}).length>64000)throw new Error('Conteúdo muito grande.');const generation=epoch;const result=await api(data.method,route,data.body);if(route.endsWith('/commerce')&&generation===epoch){goal=enabledCatalogGoal(result);if(prepared)await syncOverlay();}return result;}
   if(name==='bounds'){if(!prepared)return;const r=data||{};const scale=win.webContents.getZoomFactor()*require('electron').screen.getDisplayMatching(win.getBounds()).scaleFactor;const [cw,ch]=win.getContentSize();for(const k of ['x','y','width','height'])if(!Number.isFinite(r[k])||r[k]<0||r[k]>10000)throw new Error('Área inválida.');if(r.x+r.width>cw+5||r.y+r.height>ch+5)throw new Error('Área fora da janela.');const revision=++previewRevision;await engine.request('preview',{visible:false});if(revision!==previewRevision||!r.width||!r.height)return;await engine.request('resize',{bounds:Object.fromEntries(['x','y','width','height'].map(k=>[k,Math.round(r[k]*scale)]))});if(revision===previewRevision&&prepared)await engine.request('preview',{visible:true});return;}
   if(name==='end'){epoch++;return endSession();}
+  // The file dialog is modal and may stay open for a while; it must not block the heartbeat, so it runs outside the busy section.
+  if(name==='image.pick'){if(!win||win.isDestroyed())throw new Error('Janela indisponível.');const picked=await dialog.showOpenDialog(win,{title:'Escolher imagem',properties:['openFile'],filters:[{name:'Imagens',extensions:IMAGE_EXTENSIONS.map(ext=>ext.slice(1))}]});if(picked.canceled||!picked.filePaths?.length)return null;const file=picked.filePaths[0];if(!(await imageUsable(file)))throw new Error('Escolha uma imagem PNG, JPG, GIF, BMP ou WebP de até 25 MB.');allowedImages.add(file);return {file,name:path.basename(file)};}
   if(busy||heartbeatBusy&&['prepare','start','resume','logout'].includes(name))throw new Error('Aguarde a operação atual.');busy=true;failure='';emit();try{
     switch(name){
       case 'updates.check':return checkUpdate();
@@ -108,8 +114,10 @@ async function command(name,data){
       case 'login':{if(active()||user||pendingAccount)throw new Error('Saia da conta atual antes de conectar outra.');authorization=null;if(token)await clearCredentials();const result=await api('POST','/obs/device/authorize',{device_name:'Privex Studio · Windows',scopes:['live:manage','studio:manager']},false);const url=verificationURL(result.verification_uri_complete);authorization={...result,expiresAt:Date.now()+result.expires_in*1000,nextPoll:Date.now()+6000};await shell.openExternal(url);return;}
       case 'login.cancel':authorization=null;return;
       case 'enumerate':if(!user)throw new Error('Entre antes de acessar equipamentos.');return engine.request('enumerate');
-      case 'prepare':{if(!user||studio?.session&&!studio.session.managed_by_device)throw new Error('Encerre a sessão no outro dispositivo antes de trocar equipamentos.');const generation=epoch;const config={...prepareInput(data),muted,microphoneVolume,desktopVolume};const h=win.getNativeWindowHandle();config.parentHwnd=h.length>=8?h.readBigUInt64LE().toString():h.readUInt32LE().toString();const replacing=prepared&&mediaConfig&&config.width===mediaConfig.width&&config.height===mediaConfig.height;if(transmitting&&!replacing)throw new Error('Encerre a live antes de mudar o formato.');if(!replacing)prepared=false;const result=await engine.request(replacing?'reconfigure':'prepare',config);if(generation!==epoch){await stopLocal();return;}mediaConfig=config;if(!replacing)sceneMode='live';prepared=true;await syncOverlay();notice=transmitting?'Equipamentos aplicados. A live continua no ar.':'Equipamentos aplicados à prévia local.';return result;}
+      case 'prepare':{if(!user||studio?.session&&!studio.session.managed_by_device)throw new Error('Encerre a sessão no outro dispositivo antes de trocar equipamentos.');const generation=epoch;const config={...prepareInput(data,allowedImages),muted,microphoneVolume,desktopVolume};const h=win.getNativeWindowHandle();config.parentHwnd=h.length>=8?h.readBigUInt64LE().toString():h.readUInt32LE().toString();const replacing=prepared&&mediaConfig&&config.width===mediaConfig.width&&config.height===mediaConfig.height;if(transmitting&&!replacing)throw new Error('Encerre a live antes de mudar o formato.');if(!replacing)prepared=false;const result=await engine.request(replacing?'reconfigure':'prepare',config);if(generation!==epoch){await stopLocal();return;}mediaConfig=config;if(!replacing)sceneMode='live';prepared=true;await syncOverlay();notice=transmitting?'Equipamentos aplicados. A live continua no ar.':'Equipamentos aplicados à prévia local.';return result;}
       case 'volume':{if(!prepared)throw new Error('Prepare os equipamentos antes de ajustar o áudio.');const config=audioInput(data);const result=await engine.request('volume',config);if(config.channel==='microphone')microphoneVolume=config.volume;else desktopVolume=config.volume;if(mediaConfig){mediaConfig.microphoneVolume=microphoneVolume;mediaConfig.desktopVolume=desktopVolume;}return result;}
+      case 'layer':{if(!prepared||!mediaConfig)throw new Error('Abra a prévia antes de mostrar ou ocultar fontes.');if(!data||!Number.isInteger(data.index)||data.index<0||data.index>=mediaConfig.layers.length||typeof data.visible!=='boolean')throw new Error('Fonte inválida.');const result=await engine.request('layer',{index:data.index,visible:data.visible});mediaConfig.layers[data.index].visible=data.visible;return result;}
+      case 'layout.save':{const next=layoutInput(data,allowedImages);await persistLayout(next);layout=next;return;}
       case 'mute':{if(typeof data?.muted!=='boolean')throw new Error('Controle inválido.');const result=await engine.request('mute',{muted:data.muted});muted=data.muted;if(mediaConfig)mediaConfig.muted=muted;return result;}
       case 'scene':{if(!prepared||!['live','pause'].includes(data?.mode))throw new Error('Cena indisponível.');const result=await engine.request('scene',{mode:data.mode});sceneMode=data.mode;return result;}
       case 'overlay':{if(typeof data?.enabled!=='boolean')throw new Error('Controle inválido.');if(data.enabled&&active()){const catalog=await api('GET',`/obs/v1/manager/live/${studio.session.id}/commerce`);goal=enabledCatalogGoal(catalog);}overlayEnabled=data.enabled;await syncOverlay();return;}
@@ -125,6 +133,8 @@ async function boot(){
   credentialsFile=path.join(app.getPath('userData'),'device.dpapi');
   updatePreferencesFile=path.join(app.getPath('userData'),'update-preferences.json');
   automaticUpdateChecks=await loadUpdatePreferences(updatePreferencesFile);
+  layoutFile=path.join(app.getPath('userData'),'studio-layout.json');
+  layout=await loadLayout(layoutFile,allowedImages);
   const root=path.resolve(__dirname,'../ui');
   protocol.handle('privex',request=>{const u=new URL(request.url);let file;try{file=decodeURIComponent(u.pathname);}catch{return new Response('Invalid',{status:400});}const resolved=path.resolve(root,'.'+file);if(u.host!=='studio'||resolved!==root&&!resolved.startsWith(root+path.sep))return new Response('Denied',{status:403});return net.fetch(pathToFileURL(resolved===root?path.join(root,'index.html'):resolved).href);});
   const enginePath=app.isPackaged?path.join(process.resourcesPath,'engine','PrivexStudioEngine.exe'):path.resolve(__dirname,'../build/engine/PrivexStudioEngine.exe');engine=new Engine(enginePath);engine.on('lost',engineLost);

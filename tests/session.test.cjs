@@ -35,6 +35,7 @@ function fixture(overrides={}) {
       if(name==='node:fs/promises' && overrides.downloadInstaller)return {...require(name),rm:async()=>{}};
       if (name === './engine.cjs') return { Engine: class {} };
       if (name === './security.cjs') return require('../main/security.cjs');
+      if (name === './studio-layout.cjs') return require('../main/studio-layout.cjs');
       if (name === './audio-meter.cjs') return require('../main/audio-meter.cjs');
       if (name === './installer-update.cjs') return overrides.downloadInstaller?{downloadInstaller:overrides.downloadInstaller,verifyInstaller:overrides.verifyInstaller||async function(){},clearInstalledDownloads:async function(){}}:require('../main/installer-update.cjs');
       if (name === './updates.cjs') return overrides.checkForUpdates?{checkForUpdates:overrides.checkForUpdates}:require('../main/updates.cjs');
@@ -61,6 +62,7 @@ function fixture(overrides={}) {
         if ('studio' in v) studio = v.studio;
         if ('prepared' in v) prepared = v.prepared;
         if ('transmitting' in v) transmitting = v.transmitting;
+        if ('persistLayout' in v) persistLayout = v.persistLayout;
       },
       state() { return { prepared, transmitting, studio, intent, epoch, busy, mediaConfig }; }
     };
@@ -425,4 +427,35 @@ test('native meter events expose bounded telemetry separately and clear on stop'
  await subject.command('end');assert.equal(subject.snapshot().audioMeters.microphone.configured,false);
  await subject.mediaEvent({event:'audio-levels',channels:{microphone:{configured:true,receiving:true,inputDb:0}}});
  assert.equal(subject.snapshot().audioMeters.microphone.configured,false,'Late native event cannot restore capture indication after stopping');
+});
+
+
+test('layered scenes reach the engine only through validated layers and an image allowlist',async()=>{
+ const {subject,engineCalls}=fixture();
+ await subject.command('prepare',{layers:[{kind:'camera',id:'explicit-camera',fit:'corner',corner:'tl',size:.35},{kind:'display',id:'monitor-1'},{kind:'text',text:'Bem-vindas'}],microphoneId:'explicit-mic',portrait:false});
+ const config=engineCalls.filter(c=>c.name==='prepare').at(-1).data;
+ assert.equal(config.layers.length,3);assert.equal(config.layers[0].kind,'camera');assert.equal(config.layers[0].corner,'tl');assert.equal(config.sourceType,'camera');assert.equal(config.width,1280);
+ await assert.rejects(subject.command('prepare',{layers:[{kind:'image',file:'C:\anywhere\secret.png'}]}),/seletor/,'renderer cannot point the engine at arbitrary files');
+ await assert.rejects(subject.command('prepare',{layers:new Array(7).fill({kind:'text',text:'x'})}),/1 a 6/);
+ assert.equal(engineCalls.filter(c=>c.name==='prepare'||c.name==='reconfigure').length,1);
+});
+
+test('layer visibility toggles are bounded, update the recovery configuration and need an open preview',async()=>{
+ const {subject,engineCalls}=fixture();
+ subject.configure({prepared:false});
+ await assert.rejects(subject.command('layer',{index:0,visible:false}),/prévia/);
+ await subject.command('prepare',{layers:[{kind:'camera',id:'explicit-camera'},{kind:'text',text:'Oi'}]});
+ await subject.command('layer',{index:1,visible:false});
+ const toggle=engineCalls.at(-1);assert.equal(toggle.name,'layer');assert.equal(toggle.data.index,1);assert.equal(toggle.data.visible,false);
+ assert.equal(subject.state().mediaConfig.layers[1].visible,false,'automatic reconnect must restore the hidden state');
+ for(const bad of [null,{index:2,visible:false},{index:-1,visible:true},{index:0,visible:'no'},{index:0.5,visible:true}])await assert.rejects(subject.command('layer',bad),/inválida/);
+});
+
+test('saved layouts are validated and persisted through the layout module only',async()=>{
+ const {subject}=fixture();
+ let written=null;subject.configure({persistLayout:async value=>{written=value;}});
+ await subject.command('layout.save',{scenes:[{id:'principal',name:'Principal',layers:[{kind:'camera',id:'cam'}]},{id:'pausa',name:'Pausa',layers:[{kind:'text',text:'Volto já'}]}],activeScene:'pausa',microphoneId:'mic',desktopId:'',portrait:true});
+ assert.equal(written.activeScene,'pausa');assert.equal(written.scenes.length,2);assert.equal(subject.snapshot().layout.portrait,true);assert.equal(subject.snapshot().layout.fresh,undefined);
+ await assert.rejects(subject.command('layout.save',{scenes:[{id:'principal',layers:[{kind:'image',file:'C:\pictures\never-picked.png'}]}]}),/seletor/);
+ assert.equal(subject.snapshot().layout.activeScene,'pausa','a rejected layout leaves the previous one untouched');
 });

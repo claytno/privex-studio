@@ -28,12 +28,53 @@ function verificationURL(input) {
   if (!/^[A-Z0-9]{4}-?[A-Z0-9]{4}$/.test(u.searchParams.get('code') || '') || [...u.searchParams.keys()].some(k => k !== 'code')) throw new Error('Código inválido.');
   return u.href;
 }
-function prepareInput(value) {
-  if (!value || !['camera','window','display'].includes(value.sourceType)) throw new Error('Escolha uma fonte.');
-  const result = { sourceType:value.sourceType, width:value.portrait ? 720 : 1280, height:value.portrait ? 1280 : 720, fps:30 };
-  for (const key of ['cameraId','microphoneId','desktopId','sourceId']) {
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
+const LAYER_KINDS = ['camera', 'window', 'display', 'image', 'text'];
+const CAPTURE_KINDS = ['camera', 'window', 'display'];
+const CORNERS = ['tl', 'tr', 'bl', 'br'];
+function cleanText(value, max, message) {
+  if (typeof value !== 'string' || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error(message);
+  return value;
+}
+/** Absolute Windows path with an image extension. Existence is checked by the picker or the saved-layout loader. */
+function imageFileAllowed(file) {
+  return typeof file === 'string' && file.length <= 1024 && !/[\x00-\x1f\x7f]/.test(file) && /^[A-Za-z]:\\/.test(file) && IMAGE_EXTENSIONS.includes(require('node:path').extname(file).toLowerCase());
+}
+/** One composition layer chosen in the renderer. Image files must come from the native picker or a validated saved layout. */
+function layerInput(value, allowedFiles) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !LAYER_KINDS.includes(value.kind)) throw new Error('Fonte inválida.');
+  const layer = {
+    kind: value.kind,
+    fit: ['fit', 'fill', 'corner'].includes(value.fit) ? value.fit : 'fit',
+    corner: CORNERS.includes(value.corner) ? value.corner : 'br',
+    size: Number.isFinite(value.size) ? Math.min(.6, Math.max(.15, Math.round(value.size * 100) / 100)) : .3,
+    visible: value.visible !== false,
+    name: cleanText(value.name ?? '', 40, 'Nome da fonte inválido.'),
+  };
+  if (CAPTURE_KINDS.includes(layer.kind)) { layer.id = cleanText(value.id ?? '', 4096, 'Equipamento inválido.'); if (!layer.id) throw new Error('Escolha o equipamento dessa fonte.'); }
+  else if (layer.kind === 'image') { if (!imageFileAllowed(value.file) || !allowedFiles?.has(value.file)) throw new Error('Escolha a imagem pelo seletor do Studio.'); layer.file = value.file; }
+  else { layer.text = cleanText(value.text ?? '', 120, 'Texto inválido.').trim(); if (!layer.text) throw new Error('Digite o texto dessa fonte.'); }
+  return layer;
+}
+function layersInput(value, allowedFiles) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 6) throw new Error('A cena precisa de 1 a 6 fontes.');
+  return value.map(layer => layerInput(layer, allowedFiles));
+}
+function prepareInput(value, allowedFiles = new Set()) {
+  if (!value || typeof value !== 'object') throw new Error('Escolha uma fonte.');
+  const result = { width: value.portrait ? 720 : 1280, height: value.portrait ? 1280 : 720, fps: 30 };
+  for (const key of ['cameraId', 'microphoneId', 'desktopId', 'sourceId']) {
     if (value[key] != null && (typeof value[key] !== 'string' || value[key].length > 4096 || /[\x00-\x1f]/.test(value[key]))) throw new Error('Equipamento inválido.');
     result[key] = value[key] || '';
+  }
+  if (Array.isArray(value.layers)) {
+    result.layers = layersInput(value.layers, allowedFiles);
+    const primary = result.layers.find(layer => CAPTURE_KINDS.includes(layer.kind));
+    result.sourceType = primary ? primary.kind : result.layers[0].kind;
+  } else {
+    if (!CAPTURE_KINDS.includes(value.sourceType)) throw new Error('Escolha uma fonte.');
+    result.sourceType = value.sourceType;
+    result.layers = [{ kind: value.sourceType, id: value.sourceType === 'camera' ? result.cameraId : result.sourceId, fit: 'fit', corner: 'br', size: .3, visible: true, name: '' }];
   }
   return result;
 }
@@ -41,4 +82,4 @@ function audioInput(value) {
   if (!value || !['microphone','desktop'].includes(value.channel) || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 100) throw new Error('Volume inválido.');
   return {channel:value.channel,volume:value.volume};
 }
-module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, uuid };
+module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, layerInput, layersInput, imageFileAllowed, IMAGE_EXTENSIONS, LAYER_KINDS, CAPTURE_KINDS, uuid };

@@ -7,6 +7,7 @@
 #include <util/platform.h>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -60,6 +61,9 @@ DWORD parentProcessId() {
  if (Process32First(snapshot, &entry)) do { if (entry.th32ProcessID == GetCurrentProcessId()) { parent = entry.th32ParentProcessID; break; } } while (Process32Next(snapshot, &entry));
  CloseHandle(snapshot); return parent;
 }
+bool captureKind(const QString &kind) { return kind == "camera" || kind == "window" || kind == "display"; }
+const char *captureType(const QString &kind) { return kind == "camera" ? "dshow_input" : kind == "window" ? "window_capture" : "monitor_capture"; }
+const char *captureProperty(const QString &kind) { return kind == "camera" ? "video_device_id" : kind == "window" ? "window" : "monitor_id"; }
 
 // The audio callback retains numbers only; raw audio never crosses the native process.
 struct AudioMeter {
@@ -106,15 +110,19 @@ struct AudioMeter {
  ~AudioMeter(){detach();}
 };
 
+// One composed video layer. Index 0 of the requested list is the front-most layer, like a studio source list.
+struct Layer { QJsonObject spec; QString key; obs_source_t *source = nullptr; obs_sceneitem_t *item = nullptr; bool visible = true, capture = false, created = false, claimed = false; };
+struct Box { int x, y, w, h; uint32_t align; };
+
 struct Engine {
  bool initialized = false, prepared = false, starting = false, paused = false, desiredMuted = false;
  int width = 1280, height = 720, fps = 30;
  obs_scene_t *scene = nullptr;
- obs_source_t *visual = nullptr, *mic = nullptr, *desktop = nullptr;
+ obs_source_t *mic = nullptr, *desktop = nullptr;
+ std::vector<Layer> layers;
  QJsonObject captureConfig;
  float micVolume = 1.0f, desktopVolume = 1.0f;
  AudioMeter micMeter,desktopMeter;
- obs_sceneitem_t *visualItem = nullptr;
  std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> pauseSources, overlaySources;
  QJsonObject overlayConfig;
  obs_output_t *output = nullptr;
@@ -163,9 +171,9 @@ struct Engine {
   if (display) { obs_display_remove_draw_callback(display, draw, this); obs_display_destroy(display); display = nullptr; }
   if (preview) { DestroyWindow(preview); preview = nullptr; } previewPositioned = false;
   if (initialized) { obs_set_output_source(0, nullptr); obs_set_output_source(1, nullptr); obs_set_output_source(2, nullptr); }
-  clearLayer(overlaySources); clearLayer(pauseSources); overlayConfig = {}; visualItem = nullptr; paused = false;
+  clearLayer(overlaySources); clearLayer(pauseSources); overlayConfig = {}; paused = false;
+  for (auto &layer : layers) { if (layer.item) obs_sceneitem_remove(layer.item); if (layer.source) obs_source_release(layer.source); } layers.clear();
   if (scene) { obs_scene_release(scene); scene = nullptr; }
-  if (visual) { obs_source_release(visual); visual = nullptr; }
   if (mic) { obs_source_release(mic); mic = nullptr; }
   if (desktop) { obs_source_release(desktop); desktop = nullptr; }
   captureConfig = {};
@@ -205,11 +213,6 @@ struct Engine {
   obs_display_add_draw_callback(display, draw, this);
   if (args.contains("bounds")) resize(args.value("bounds").toObject());
  }
- void fitVisual() {
-  auto *item = obs_scene_add(scene, visual); visualItem = item; require(item, "Could not compose video");
-  vec2 bounds{float(width), float(height)}; obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_SCALE_INNER); obs_sceneitem_set_bounds_alignment(item, OBS_ALIGN_CENTER);
-  obs_sceneitem_set_bounds_crop(item, false); obs_sceneitem_set_bounds(item, &bounds); obs_sceneitem_set_alignment(item, OBS_ALIGN_TOP | OBS_ALIGN_LEFT);
- }
  void clearLayer(std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> &sources) {
   for (auto [source, item] : sources) { if (item) obs_sceneitem_remove(item); if (source) obs_source_release(source); } sources.clear();
  }
@@ -222,20 +225,145 @@ struct Engine {
   auto *settings = obs_data_create(); obs_data_set_int(settings,"width",std::max(w,1)); obs_data_set_int(settings,"height",std::max(h,1)); obs_data_set_int(settings,"color",color);
   auto *source = obs_source_create_private("color_source_v3",name,settings); obs_data_release(settings); return source;
  }
- obs_source_t *textSource(const char *name, const QString &text, int size, int w, int h) {
+ obs_source_t *textSource(const char *name, const QString &text, int size, int w, int h, const char *align = "left", const char *valign = "top", bool outline = false) {
   auto *settings = obs_data_create(); auto *font = obs_data_create(); obs_data_set_string(font,"face","Segoe UI"); obs_data_set_int(font,"size",size); obs_data_set_int(font,"flags",1);
   obs_data_set_obj(settings,"font",font); obs_data_release(font); obs_data_set_string(settings,"text",text.toUtf8().constData());
   obs_data_set_bool(settings,"read_from_file",false); obs_data_set_int(settings,"color",0xffffff); obs_data_set_int(settings,"opacity",100);
+  obs_data_set_string(settings,"align",align); obs_data_set_string(settings,"valign",valign);
+  if (outline) { obs_data_set_bool(settings,"outline",true); obs_data_set_int(settings,"outline_size",std::max(2,size/12)); obs_data_set_int(settings,"outline_color",0x000000); obs_data_set_int(settings,"outline_opacity",100); }
   obs_data_set_bool(settings,"extents",true); obs_data_set_bool(settings,"extents_wrap",true); obs_data_set_int(settings,"extents_cx",w); obs_data_set_int(settings,"extents_cy",h);
   auto *source = obs_source_create_private("text_gdiplus_v3",name,settings); obs_data_release(settings); return source;
  }
+ // Layer geometry: full canvas (fit/fill) or a 16:9 box in one corner sized as a fraction of the canvas width.
+ Box layerBox(const QJsonObject &n) const {
+  if (n.value("fit").toString() != "corner") return {0, 0, width, height, OBS_ALIGN_CENTER};
+  const double size = n.value("size").toDouble(0.3); const auto corner = n.value("corner").toString();
+  const int w = std::max(16, int(std::lround(width * size))), h = std::max(9, int(std::lround(w * 9.0 / 16.0))), margin = int(std::lround(std::min(width, height) * 0.03));
+  const bool top = corner.startsWith('t'), left = corner.endsWith('l');
+  return {left ? margin : width - margin - w, top ? margin : height - margin - h, w, h, uint32_t((top ? OBS_ALIGN_TOP : OBS_ALIGN_BOTTOM) | (left ? OBS_ALIGN_LEFT : OBS_ALIGN_RIGHT))};
+ }
+ QJsonObject normalizeLayer(const QJsonObject &spec) {
+  const auto kind = stringArg(spec, "kind", 16);
+  require(captureKind(kind) || kind == "image" || kind == "text" || (diagnosticSelfTest && kind == "synthetic"), "Unsupported source type");
+  const auto fit = spec.contains("fit") ? stringArg(spec, "fit", 8) : QString("fit"); require(fit == "fit" || fit == "fill" || fit == "corner", "Invalid layer placement");
+  const auto corner = spec.contains("corner") ? stringArg(spec, "corner", 2) : QString("br"); require(corner == "tl" || corner == "tr" || corner == "bl" || corner == "br", "Invalid layer corner");
+  const double size = spec.value("size").toDouble(0.3); require(std::isfinite(size) && size >= 0.1 && size <= 0.7, "Invalid layer size");
+  require(!spec.contains("visible") || spec.value("visible").isBool(), "Invalid layer visibility");
+  QJsonObject n{{"kind", kind}, {"fit", fit}, {"corner", corner}, {"size", size}, {"visible", spec.value("visible").toBool(true)}};
+  if (captureKind(kind)) { const auto id = stringArg(spec, "id"); require(!id.isEmpty() && hasId(list(captureType(kind), captureProperty(kind)), id), "Selected video device is unavailable"); n.insert("id", id); }
+  else if (kind == "image") {
+   const auto file = stringArg(spec, "file", 1024); QFileInfo info(file); const auto suffix = info.suffix().toLower();
+   require(info.isAbsolute() && info.isFile() && info.size() > 0 && info.size() <= 25 * 1024 * 1024 && (suffix == "png" || suffix == "jpg" || suffix == "jpeg" || suffix == "gif" || suffix == "bmp" || suffix == "webp"), "Image file is unavailable");
+   n.insert("file", QDir::toNativeSeparators(info.absoluteFilePath()));
+  }
+  else if (kind == "text") { const auto text = stringArg(spec, "text", 200).trimmed(); require(!text.isEmpty(), "Text source needs text"); n.insert("text", text); }
+  else { n.insert("width", spec.value("width").toInt(1280)); n.insert("height", spec.value("height").toInt(720)); n.insert("color", spec.value("color").toDouble(4294967295.0)); }
+  return n;
+ }
+ // Explicit layer list, or the single-source form used by earlier hosts. Every device id is checked against the current enumeration.
+ QJsonArray layerSpecs(const QJsonObject &args) {
+  QJsonArray specs;
+  if (args.contains("layers")) {
+   require(args.value("layers").isArray(), "Invalid layers"); const auto items = args.value("layers").toArray(); require(items.size() >= 1 && items.size() <= 8, "Scene needs 1 to 8 sources");
+   for (const auto &v : items) { require(v.isObject(), "Invalid layer"); specs.append(normalizeLayer(v.toObject())); }
+   return specs;
+  }
+  const auto kind = stringArg(args, "sourceType", 16); require(captureKind(kind), "Unsupported source type");
+  specs.append(normalizeLayer({{"kind", kind}, {"id", kind == "camera" ? args.value("cameraId") : args.value("sourceId")}}));
+  return specs;
+ }
+ static QString layerKey(const QJsonObject &n) {
+  const auto kind = n.value("kind").toString();
+  if (captureKind(kind)) return kind + "|" + n.value("id").toString();
+  if (kind == "image") return "image|" + n.value("file").toString();
+  if (kind == "text") return "text|" + n.value("text").toString() + "|" + n.value("fit").toString() + n.value("corner").toString() + QString::number(n.value("size").toDouble());
+  return "synthetic|" + QString::fromUtf8(QJsonDocument(n).toJson(QJsonDocument::Compact));
+ }
+ obs_source_t *createLayerSource(const QJsonObject &n) {
+  const auto kind = n.value("kind").toString(); obs_source_t *source = nullptr;
+  if (captureKind(kind)) {
+   auto *settings = obs_data_create(); obs_data_set_string(settings, captureProperty(kind), n.value("id").toString().toUtf8().constData());
+   if (kind == "window") { obs_data_set_int(settings, "priority", 1); obs_data_set_bool(settings, "capture_audio", false); } // Exact selected title; never whole-screen fallback.
+   source = obs_source_create_private(captureType(kind), "Privex video", settings); obs_data_release(settings); require(source, "Video capture creation failed");
+   obs_source_set_audio_mixers(source, 0); obs_source_set_muted(source, true); // Camera embedded audio must not bypass the selected/muted microphone.
+  } else if (kind == "image") {
+   auto *settings = obs_data_create(); obs_data_set_string(settings, "file", n.value("file").toString().toUtf8().constData()); obs_data_set_bool(settings, "unload", false); obs_data_set_bool(settings, "linear_alpha", false);
+   source = obs_source_create_private("image_source", "Privex image", settings); obs_data_release(settings); require(source, "Image source creation failed");
+  } else if (kind == "text") {
+   const auto box = layerBox(n); const bool corner = n.value("fit").toString() == "corner"; const auto c = n.value("corner").toString();
+   const int px = std::max(12, int(std::lround(std::min(width, height) * (corner ? n.value("size").toDouble(0.3) * 0.14 : 0.06))));
+   source = textSource("Privex text", n.value("text").toString(), px, box.w, box.h, corner ? (c.endsWith('l') ? "left" : "right") : "center", corner ? (c.startsWith('t') ? "top" : "bottom") : "center", true);
+   require(source, "Text source creation failed");
+  } else source = colorSource("Privex synthetic layer", n.value("width").toInt(), n.value("height").toInt(), uint32_t(n.value("color").toDouble()));
+  require(source, "Layer source creation failed"); return source;
+ }
+ void placeLayer(obs_sceneitem_t *item, const QJsonObject &n) {
+  const auto box = layerBox(n); const bool fill = n.value("fit").toString() == "fill";
+  obs_sceneitem_defer_update_begin(item);
+  vec2 bounds{float(box.w), float(box.h)}; vec2 pos{float(box.x), float(box.y)};
+  obs_sceneitem_set_bounds_type(item, fill ? OBS_BOUNDS_SCALE_OUTER : OBS_BOUNDS_SCALE_INNER); obs_sceneitem_set_bounds_alignment(item, box.align); obs_sceneitem_set_bounds_crop(item, fill);
+  obs_sceneitem_set_bounds(item, &bounds); obs_sceneitem_set_alignment(item, OBS_ALIGN_TOP | OBS_ALIGN_LEFT); obs_sceneitem_set_pos(item, &pos);
+  obs_sceneitem_defer_update_end(item);
+ }
+ struct Swap { Engine *engine; std::vector<Layer> *next; bool failed; };
+ void swapLayersLocked(std::vector<Layer> &next, bool &failed) {
+  for (auto &old : layers) { if (old.item) obs_sceneitem_remove(old.item); old.item = nullptr; }
+  // Index 0 is the front-most layer: add it last so it renders above the others.
+  for (auto it = next.rbegin(); it != next.rend(); ++it) {
+   auto *item = obs_scene_add(scene, it->source); if (!item) { failed = true; continue; }
+   obs_sceneitem_set_visible(item, false); placeLayer(item, it->spec); obs_sceneitem_set_visible(item, it->visible && !paused); it->item = item;
+  }
+  for (auto [source, item] : pauseSources) obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
+  for (auto [source, item] : overlaySources) obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
+ }
+ // Replaces the composed layers. Unchanged sources are reused so a camera is not reopened; on failure nothing changes.
+ void applyLayers(const QJsonArray &specs, bool waitReady) {
+  require(scene, "Canvas unavailable");
+  std::vector<Layer> next; std::vector<obs_source_t *> showing;
+  try {
+   for (const auto &v : specs) {
+    Layer layer; layer.spec = v.toObject(); layer.key = layerKey(layer.spec); layer.visible = layer.spec.value("visible").toBool(true); layer.capture = captureKind(layer.spec.value("kind").toString());
+    auto reuse = std::find_if(layers.begin(), layers.end(), [&](const Layer &old) { return !old.claimed && old.key == layer.key; });
+    if (reuse != layers.end()) { reuse->claimed = true; layer.source = reuse->source; }
+    else { layer.source = createLayerSource(layer.spec); layer.created = true; if (waitReady && layer.capture) { obs_source_inc_showing(layer.source); showing.push_back(layer.source); } }
+    next.push_back(layer);
+   }
+   if (waitReady) for (auto &layer : next) if (layer.created && layer.capture) {
+    for (int attempt = 0; attempt < 120 && (!obs_source_get_width(layer.source) || !obs_source_get_height(layer.source)); attempt++) Sleep(25);
+    require(obs_source_get_width(layer.source) > 0 && obs_source_get_height(layer.source) > 0, "New video source is not ready; previous sources preserved");
+   }
+  } catch (...) {
+   for (auto *s : showing) obs_source_dec_showing(s);
+   for (auto &layer : next) if (layer.created && layer.source) obs_source_release(layer.source);
+   for (auto &old : layers) old.claimed = false;
+   throw;
+  }
+  Swap swap{this, &next, false};
+  obs_scene_atomic_update(scene, [](void *data, obs_scene_t *) { auto *s = static_cast<Swap *>(data); s->engine->swapLayersLocked(*s->next, s->failed); }, &swap);
+  for (auto &old : layers) if (!old.claimed && old.source) obs_source_release(old.source);
+  layers = std::move(next); for (auto *s : showing) obs_source_dec_showing(s);
+  require(!swap.failed, "Could not compose scene layer");
+ }
+ void setLayerVisible(int index, bool visible) {
+  require(prepared && index >= 0 && index < int(layers.size()), "Layer unavailable");
+  auto &layer = layers[size_t(index)]; layer.visible = visible; layer.spec.insert("visible", visible);
+  if (layer.item) obs_sceneitem_set_visible(layer.item, visible && !paused);
+ }
+ const Layer *primaryLayer() const { for (auto &l : layers) if (l.visible && l.capture) return &l; for (auto &l : layers) if (l.visible) return &l; return nullptr; }
+ bool videoReady() const { for (auto &l : layers) if (l.visible && l.source && obs_source_get_width(l.source) > 0 && obs_source_get_height(l.source) > 0) return true; return false; }
+ QJsonArray layerStatus() const {
+  QJsonArray result;
+  for (auto &l : layers) { const int w = l.source ? int(obs_source_get_width(l.source)) : 0, h = l.source ? int(obs_source_get_height(l.source)) : 0; result.append(QJsonObject{{"kind", l.spec.value("kind")}, {"visible", l.visible}, {"ready", w > 0 && h > 0}, {"width", w}, {"height", h}}); }
+  return result;
+ }
  void setScene(const QString &mode) {
-  require(prepared && scene && visualItem,"Prepare video before selecting a scene"); require(mode == "pause" || mode == "live","Invalid scene mode");
+  require(prepared && scene && !layers.empty(),"Prepare video before selecting a scene"); require(mode == "pause" || mode == "live","Invalid scene mode");
   if (mode == "pause" && pauseSources.empty()) {
    addLayerSource(pauseSources,colorSource("Privex interval background",width,height,0xff181018),0,0);
    addLayerSource(pauseSources,textSource("Privex interval title",QString::fromUtf8("Voltamos em instantes"),width < height ? 38 : 48,width-96,180),48,float(height/2-70));
   }
-  paused = mode == "pause"; obs_sceneitem_set_visible(visualItem,!paused);
+  paused = mode == "pause";
+  for (auto &layer : layers) if (layer.item) obs_sceneitem_set_visible(layer.item, layer.visible && !paused);
   for (auto [source,item] : pauseSources) obs_sceneitem_set_visible(item,paused);
   if (mic) obs_source_set_muted(mic,paused || desiredMuted);
   if (desktop) obs_source_set_muted(desktop,paused);
@@ -272,37 +400,15 @@ struct Engine {
   float &level = channel=="microphone" ? micVolume : desktopVolume; level=float(value/100.0);
   auto *source = channel=="microphone" ? mic : desktop; if(source) obs_source_set_volume(source,level);
  }
- void replaceVisual(obs_source_t *next) {
-  struct Change {Engine *engine;obs_source_t *source;} change{this,next};
-  obs_scene_atomic_update(scene,[](void *data,obs_scene_t *){auto *change=static_cast<Change *>(data);change->engine->replaceVisualLocked(change->source);},&change);
- }
- void replaceVisualLocked(obs_source_t *next) {
-  // The caller owns next. Keep the current scene/output/encoder and interval/goal layers.
-  auto *nextItem=obs_scene_add(scene,next); require(nextItem,"Could not compose replacement video");
-  obs_sceneitem_set_visible(nextItem,false);
-  obs_sceneitem_defer_update_begin(nextItem);
-  vec2 bounds{float(width),float(height)}; obs_sceneitem_set_bounds_type(nextItem,OBS_BOUNDS_SCALE_INNER);
-  obs_sceneitem_set_bounds_alignment(nextItem,OBS_ALIGN_CENTER); obs_sceneitem_set_bounds_crop(nextItem,false);
-  obs_sceneitem_set_bounds(nextItem,&bounds); obs_sceneitem_set_alignment(nextItem,OBS_ALIGN_TOP|OBS_ALIGN_LEFT);
-  obs_sceneitem_defer_update_end(nextItem); obs_sceneitem_set_order(nextItem,OBS_ORDER_MOVE_BOTTOM);
-  auto *previous=visual; auto *previousItem=visualItem; visual=next; visualItem=nextItem;
-  obs_sceneitem_set_visible(nextItem,!paused); if(previousItem) obs_sceneitem_remove(previousItem); if(previous) obs_source_release(previous);
- }
  QJsonObject reconfigure(const QJsonObject &args) {
   require(prepared && scene,"Prepare video before changing equipment");
   require(args.value("width").toInt()==width && args.value("height").toInt()==height && args.value("fps").toInt()==fps,"End the stream before changing canvas format");
-  const auto kind=stringArg(args,"sourceType",16); const char *type=nullptr,*prop=nullptr; QString selected;
-  if(kind=="camera"){type="dshow_input";prop="video_device_id";selected=stringArg(args,"cameraId");}
-  else if(kind=="window"){type="window_capture";prop="window";selected=stringArg(args,"sourceId");}
-  else if(kind=="display"){type="monitor_capture";prop="monitor_id";selected=stringArg(args,"sourceId");}
-  else throw std::runtime_error("Unsupported source type");
-  require(!selected.isEmpty() && hasId(list(type,prop),selected),"Selected video device is unavailable; previous source preserved");
+  const auto specs = layerSpecs(args);
   auto microphoneId=args.value("microphoneId").toString(),desktopId=args.value("desktopId").toString();
   require(microphoneId.isEmpty() || hasId(list("wasapi_input_capture","device_id"),microphoneId),"Selected microphone is unavailable");
   require(desktopId.isEmpty() || hasId(list("wasapi_output_capture","device_id"),desktopId),"Selected desktop audio is unavailable");
-  bool changeVideo=kind!=captureConfig.value("sourceType").toString() || selected!=captureConfig.value(kind=="camera"?"cameraId":"sourceId").toString();
   bool changeMic=microphoneId!=captureConfig.value("microphoneId").toString(),changeDesktop=desktopId!=captureConfig.value("desktopId").toString();
-  obs_source_t *nextVideo=nullptr,*nextMic=nullptr,*nextDesktop=nullptr; bool showing=false;
+  obs_source_t *nextMic=nullptr,*nextDesktop=nullptr;
   auto createAudio=[](const char *sourceType,const char *name,const QString &id) {
    if(id.isEmpty()) return static_cast<obs_source_t *>(nullptr);
    auto *settings=obs_data_create();obs_data_set_string(settings,"device_id",id.toUtf8().constData());
@@ -311,20 +417,11 @@ struct Engine {
   try {
    if(changeMic) nextMic=createAudio("wasapi_input_capture","Privex microphone",microphoneId);
    if(changeDesktop) nextDesktop=createAudio("wasapi_output_capture","Privex desktop audio",desktopId);
-   if(changeVideo){
-    auto *settings=obs_data_create();obs_data_set_string(settings,prop,selected.toUtf8().constData());
-    if(kind=="window"){obs_data_set_int(settings,"priority",1);obs_data_set_bool(settings,"capture_audio",false);}
-    nextVideo=obs_source_create_private(type,"Privex replacement video",settings);obs_data_release(settings);require(nextVideo,"Video capture creation failed");
-    obs_source_set_audio_mixers(nextVideo,0);obs_source_set_muted(nextVideo,true);
-    obs_source_inc_showing(nextVideo);showing=true;
-    for(int attempt=0;attempt<120 && (!obs_source_get_width(nextVideo)||!obs_source_get_height(nextVideo));attempt++) Sleep(25);
-    require(obs_source_get_width(nextVideo)>0 && obs_source_get_height(nextVideo)>0,"New video source is not ready; previous source preserved");
-    replaceVisual(nextVideo);obs_source_dec_showing(nextVideo);showing=false;nextVideo=nullptr;
-   }
+   applyLayers(specs, true);
    if(changeMic){if(nextMic){obs_source_set_volume(nextMic,micVolume);obs_source_set_muted(nextMic,paused||desiredMuted);}micMeter.detach();obs_set_output_source(1,nextMic);if(mic)obs_source_release(mic);mic=nextMic;nextMic=nullptr;micMeter.attach(mic);}
    if(changeDesktop){if(nextDesktop){obs_source_set_volume(nextDesktop,desktopVolume);obs_source_set_muted(nextDesktop,paused);}desktopMeter.detach();obs_set_output_source(2,nextDesktop);if(desktop)obs_source_release(desktop);desktop=nextDesktop;nextDesktop=nullptr;desktopMeter.attach(desktop);}
    captureConfig=args;return status();
-  } catch(...){if(nextVideo){if(showing)obs_source_dec_showing(nextVideo);obs_source_release(nextVideo);}if(nextMic)obs_source_release(nextMic);if(nextDesktop)obs_source_release(nextDesktop);throw;}
+  } catch(...){if(nextMic)obs_source_release(nextMic);if(nextDesktop)obs_source_release(nextDesktop);throw;}
  }
  QJsonObject prepare(const QJsonObject &args) {
   require(!active(), "End the stream before changing capture"); init(); clearSources();
@@ -333,29 +430,19 @@ struct Engine {
   width = args.value("width").toInt(1280); height = args.value("height").toInt(720); fps = args.value("fps").toInt(30);
   require((width == 1280 && height == 720) || (width == 720 && height == 1280) || (width == 1920 && height == 1080) || (width == 1080 && height == 1920), "Unsupported canvas size");
   require(fps == 30, "Pilot supports 30 fps"); resetVideo();
-  const auto kind = stringArg(args, "sourceType", 16); const char *type = nullptr, *prop = nullptr;
-  QString selected;
-  if (kind == "camera") { type = "dshow_input"; prop = "video_device_id"; selected = stringArg(args, "cameraId"); }
-  else if (kind == "display") { type = "monitor_capture"; prop = "monitor_id"; selected = stringArg(args, "sourceId"); }
-  else if (kind == "window") { type = "window_capture"; prop = "window"; selected = stringArg(args, "sourceId"); }
-  else throw std::runtime_error("Unsupported source type");
-  require(!selected.isEmpty() && hasId(list(type, prop), selected), "Selected video device is unavailable");
-  obs_data_t *settings = obs_data_create(); obs_data_set_string(settings, prop, selected.toUtf8().constData());
-  if (kind == "window") { obs_data_set_int(settings, "priority", 1); obs_data_set_bool(settings, "capture_audio", false); } // Exact selected title; never whole-screen fallback.
-  visual = obs_source_create_private(type, "Privex video", settings); obs_data_release(settings); require(visual, "Video capture creation failed");
-  obs_source_set_audio_mixers(visual, 0); obs_source_set_muted(visual, true); // Camera embedded audio must not bypass the selected/muted microphone.
-  scene = obs_scene_create_private("Privex canvas"); require(scene, "Canvas creation failed"); fitVisual(); obs_set_output_source(0, obs_scene_get_source(scene));
+  const auto specs = layerSpecs(args);
+  scene = obs_scene_create_private("Privex canvas"); require(scene, "Canvas creation failed"); applyLayers(specs, false); obs_set_output_source(0, obs_scene_get_source(scene));
   auto microphoneId = args.value("microphoneId").toString();
   if (!microphoneId.isEmpty()) {
    require(hasId(list("wasapi_input_capture", "device_id"), microphoneId), "Selected microphone is unavailable");
-   settings = obs_data_create(); obs_data_set_string(settings, "device_id", microphoneId.toUtf8().constData());
+   auto *settings = obs_data_create(); obs_data_set_string(settings, "device_id", microphoneId.toUtf8().constData());
    mic = obs_source_create_private("wasapi_input_capture", "Privex microphone", settings); obs_data_release(settings); require(mic, "Microphone creation failed");
    desiredMuted = args.value("muted").toBool(false); obs_source_set_muted(mic, desiredMuted); obs_source_set_volume(mic,micVolume); obs_set_output_source(1, mic);
   }
   auto desktopId=args.value("desktopId").toString();
   if(!desktopId.isEmpty()){
    require(hasId(list("wasapi_output_capture","device_id"),desktopId),"Selected desktop audio is unavailable");
-   settings=obs_data_create();obs_data_set_string(settings,"device_id",desktopId.toUtf8().constData());
+   auto *settings=obs_data_create();obs_data_set_string(settings,"device_id",desktopId.toUtf8().constData());
    desktop=obs_source_create_private("wasapi_output_capture","Privex desktop audio",settings);obs_data_release(settings);require(desktop,"Desktop audio creation failed");
    obs_source_set_volume(desktop,desktopVolume);obs_set_output_source(2,desktop);
   }
@@ -363,7 +450,7 @@ struct Engine {
   desiredMuted=args.value("muted").toBool(false);captureConfig=args;attachPreview(args); prepared = true; return status();
  }
  QJsonObject start(QJsonObject args) {
-  require(prepared && visual && obs_source_get_width(visual) > 0 && obs_source_get_height(visual) > 0, "Wait for a working video source before starting"); require(!active(), "Stream is already starting or active"); releaseOutput();
+  require(prepared && videoReady(), "Wait for a working video source before starting"); require(!active(), "Stream is already starting or active"); releaseOutput();
   QString server = stringArg(args, "server", 2048), key = stringArg(args, "streamKey", 4096); QUrl url(server);
   require(url.isValid() && url.scheme() == "rtmps" && !url.host().isEmpty() && url.userInfo().isEmpty() && url.fragment().isEmpty() && !key.isEmpty(), "A valid secure publish endpoint is required");
   obs_data_t *settings = obs_data_create(); obs_data_set_string(settings, "server", server.toUtf8().constData()); obs_data_set_string(settings, "key", key.toUtf8().constData()); obs_data_set_bool(settings, "use_auth", false);
@@ -383,12 +470,13 @@ struct Engine {
  QJsonObject status() {
   if (stopCode != 999) starting = false;
   const auto publish = publishState(connected.load(), output && obs_output_reconnecting(output), starting, prepared);
-  return {{"prepared", prepared}, {"state", QString::fromLatin1(publish.name)}, {"streaming", publish.streaming}, {"width", width}, {"height", height}, {"fps", fps}, {"muted", !mic || obs_source_muted(mic)}, {"sceneMode",paused?"pause":"live"}, {"overlayVisible",!overlaySources.empty()}, {"sourceWidth", visual ? int(obs_source_get_width(visual)) : 0}, {"sourceHeight", visual ? int(obs_source_get_height(visual)) : 0}, {"totalBytes", output ? double(obs_output_get_total_bytes(output)) : 0}, {"droppedFrames", output ? obs_output_get_frames_dropped(output) : 0}, {"stopCode", stopCode == 999 ? QJsonValue() : QJsonValue(stopCode.load())}};
+  const Layer *primary = primaryLayer();
+  return {{"prepared", prepared}, {"state", QString::fromLatin1(publish.name)}, {"streaming", publish.streaming}, {"width", width}, {"height", height}, {"fps", fps}, {"muted", !mic || obs_source_muted(mic)}, {"sceneMode",paused?"pause":"live"}, {"overlayVisible",!overlaySources.empty()}, {"sourceWidth", primary ? int(obs_source_get_width(primary->source)) : 0}, {"sourceHeight", primary ? int(obs_source_get_height(primary->source)) : 0}, {"layers", layerStatus()}, {"totalBytes", output ? double(obs_output_get_total_bytes(output)) : 0}, {"droppedFrames", output ? obs_output_get_frames_dropped(output) : 0}, {"stopCode", stopCode == 999 ? QJsonValue() : QJsonValue(stopCode.load())}};
  }
  QJsonObject audioLevels(){return {{"microphone",micMeter.read(mic)},{"desktop",desktopMeter.read(desktop)}};}
 };
 
-std::atomic<int> testFrames = 0, testFitFrames = 0, testStage = 0, testPauseFrames = 0, testOverlayFrames = 0;
+std::atomic<int> testFrames = 0, testFitFrames = 0, testStage = 0, testPauseFrames = 0, testOverlayFrames = 0, testCornerFrames = 0, testHiddenFrames = 0;
 void testFrame(void *, video_data *frame) {
  testFrames++;
  // Portrait canvas, full landscape source: center white, top/bottom letterbox black.
@@ -398,6 +486,10 @@ void testFrame(void *, video_data *frame) {
  if (testStage == 1 && left[0] < 40 && right[0] < 40) testPauseFrames++;
  auto *fill = pixel(60,1249), *track = pixel(490,1249), *outside = pixel(600,1249);
  if (testStage == 2 && fill[2] > 150 && fill[1] < 100 && fill[0] > 130 && track[2] < 100 && track[0] < 100 && outside[0] < 20 && outside[1] < 20 && outside[2] < 20) testOverlayFrames++;
+ // Corner layer (40% width, bottom-right) over the letterboxed white base: red inside the box, black beside it, white center.
+ auto *cornerPx = pixel(550,1180), *besideCorner = pixel(100,1180);
+ if (testStage == 3 && cornerPx[2] > 200 && cornerPx[1] < 60 && cornerPx[0] < 60 && besideCorner[0] < 20 && besideCorner[2] < 20 && center[0] > 230) testCornerFrames++;
+ if (testStage == 4 && cornerPx[0] < 20 && cornerPx[1] < 20 && cornerPx[2] < 20 && center[0] > 230) testHiddenFrames++;
 }
 int testAudioMeters(){
  require(AudioMeter::boundedDb(-INFINITY)==-60 && AudioMeter::boundedDb(NAN)==-60 && AudioMeter::boundedDb(12)==0 && AudioMeter::boundedDb(-12)==-12,"Meter numerical bounds failed");
@@ -425,6 +517,7 @@ int testAudioMeters(){
  for(int i=0;i<20;i++){meter.detach();meter.attach(source);Sleep(2);}feeding=false;producer.join();
  meter.detach();require(meter.read(nullptr).value("state").toString()=="unconfigured","Detached meter must clear old device state");obs_source_release(source);return 8;
 }
+QJsonObject synthetic(int w, int h, double color, const char *fit = "fit", const char *corner = "br", double size = 0.3) { return {{"kind","synthetic"},{"width",w},{"height",h},{"color",color},{"fit",fit},{"corner",corner},{"size",size}}; }
 int selfTest(Engine &e) {
  const auto beforeDisconnect = publishState(true, false, true, true);
  require(QString::fromLatin1(beforeDisconnect.name) == "streaming" && beforeDisconnect.streaming, "Connected output must be streaming");
@@ -437,9 +530,10 @@ int selfTest(Engine &e) {
  const auto failedConnection = publishState(false, false, false, true);
  require(QString::fromLatin1(failedConnection.name) == "ready" && !failedConnection.streaming, "Failed connection must return to ready without streaming");
  e.init();int meterChecks=testAudioMeters();e.width = 720; e.height = 1280; e.resetVideo();
- auto *settings = obs_data_create(); obs_data_set_int(settings, "width", 1280); obs_data_set_int(settings, "height", 720); obs_data_set_int(settings, "color", 0xffffffff);
- e.visual = obs_source_create_private("color_source_v3", "Synthetic fit test", settings); obs_data_release(settings); require(e.visual, "Synthetic source unavailable");
- e.scene = obs_scene_create_private("Synthetic canvas"); e.fitVisual(); obs_set_output_source(0, obs_scene_get_source(e.scene));
+ const double white = 4294967295.0, green = double(0xff00ff00u), red = double(0xff0000ffu);
+ e.scene = obs_scene_create_private("Synthetic canvas"); require(e.scene, "Synthetic canvas unavailable");
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280, 720, white))}, false); obs_set_output_source(0, obs_scene_get_source(e.scene));
+ require(e.layers.size() == 1 && e.layers[0].source && e.layers[0].item, "Synthetic source unavailable");
  video_scale_info conversion{}; conversion.format = VIDEO_FORMAT_BGRA; conversion.width = 720; conversion.height = 1280; conversion.colorspace = VIDEO_CS_709; conversion.range = VIDEO_RANGE_FULL;
  obs_add_raw_video_callback(&conversion, testFrame, nullptr); Sleep(1500);
  require(testFrames > 5 && testFitFrames > 5, "Full-image portrait composition pixel check failed");
@@ -455,19 +549,28 @@ int selfTest(Engine &e) {
  e.volume({{"channel","microphone"},{"volume",25}});e.volume({{"channel","desktop"},{"volume",60}});
  require(std::abs(obs_source_get_volume(e.mic)-.25f)<.001f && std::abs(obs_source_get_volume(e.desktop)-.60f)<.001f,"Independent audio volume not applied");
  auto *sameScene=e.scene;e.setScene("pause");require(obs_source_muted(e.desktop),"Interval must mute desktop audio too");
- e.replaceVisual(e.colorSource("Synthetic replacement video",720,1280,0xff00ff00));
- require(e.scene==sameScene && e.paused && !obs_sceneitem_visible(e.visualItem),"Switch must preserve scene and interval privacy");
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(720, 1280, green))}, false);
+ require(e.scene==sameScene && e.paused && e.layers.size()==1 && !obs_sceneitem_visible(e.layers[0].item),"Switch must preserve scene and interval privacy");
  e.setScene("live");require(!obs_source_muted(e.desktop) && obs_source_muted(e.mic),"Switch/resume must restore independent mute states");
  require(std::abs(obs_source_get_volume(e.desktop)-.60f)<.001f,"Switch must preserve desktop volume");
- auto *sameVisual=e.visual;e.starting=true;bool refused=false;
+ auto *sameVisual=e.layers[0].source;e.starting=true;bool refused=false;
  try{e.reconfigure({{"width",720},{"height",1280},{"fps",30},{"sourceType","camera"},{"cameraId","synthetic-missing-device"}});}catch(const std::exception &){refused=true;}
- require(refused && e.visual==sameVisual && e.scene==sameScene && e.active(),"Unavailable replacement must preserve publishing and previous source");e.starting=false;
+ require(refused && e.layers.size()==1 && e.layers[0].source==sameVisual && e.scene==sameScene && e.active(),"Unavailable replacement must preserve publishing and previous source");e.starting=false;
  refused=false;try{e.volume({{"channel","desktop"},{"volume",101}});}catch(const std::exception &){refused=true;}
  require(refused && std::abs(obs_source_get_volume(e.desktop)-.60f)<.001f,"Invalid volume must preserve previous level");
+ // Layered composition: a red corner box in front of the letterboxed white base, then hidden, then re-applied reusing sources.
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(640, 360, red, "corner", "br", 0.4)), e.normalizeLayer(synthetic(1280, 720, white))}, false); testStage=3; Sleep(500);
+ require(testCornerFrames>5,"Corner layer pixel check failed");
+ e.setLayerVisible(0,false); testStage=4; Sleep(500); require(testHiddenFrames>5,"Hidden layer must disappear from the canvas");
+ auto *cornerSource=e.layers[0].source,*baseSource=e.layers[1].source;
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(640, 360, red, "corner", "tl", 0.4)), e.normalizeLayer(synthetic(1280, 720, white))}, false);
+ require(e.layers[1].source==baseSource && e.layers[0].source!=cornerSource && e.layers[0].visible,"Unchanged layers must keep their source; changed placement recreates only that layer");
+ refused=false;try{e.applyLayers(QJsonArray{e.normalizeLayer(QJsonObject{{"kind","text"},{"text","   "}})},false);}catch(const std::exception &){refused=true;}
+ require(refused && e.layers.size()==2 && e.layers[1].source==baseSource,"Invalid layer list must preserve the current composition");
  obs_remove_raw_video_callback(testFrame, nullptr);
  e.videoEncoder = obs_video_encoder_create("obs_x264", "Synthetic encoder", nullptr, nullptr); e.audioEncoder = obs_audio_encoder_create("ffmpeg_aac", "Synthetic audio encoder", nullptr, 0, nullptr);
  require(e.videoEncoder && e.audioEncoder, "Bundled H264/AAC encoders unavailable");
- send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
+ send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",4}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
 }
 }
 int main(int argc, char **argv) {
@@ -494,6 +597,7 @@ int main(int argc, char **argv) {
     if (command == "enumerate") result = engine.enumerate();
     else if (command == "prepare") { try { result = engine.prepare(args); } catch (...) { if (!engine.active()) engine.clearSources(); throw; } }
     else if (command == "reconfigure") result = engine.reconfigure(args);
+    else if (command == "layer") { require(args.value("index").isDouble() && args.value("visible").isBool(), "Invalid layer request"); engine.setLayerVisible(args.value("index").toInt(), args.value("visible").toBool()); result = engine.status(); }
     else if (command == "volume") { engine.volume(args); result=engine.status(); }
     else if (command == "start") { try { result = engine.start(args); } catch (...) { if (!engine.active()) engine.releaseOutput(); throw; } }
     else if (command == "stop") { engine.releaseOutput(); engine.clearSources(); result = engine.status(); }
