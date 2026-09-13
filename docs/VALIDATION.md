@@ -160,3 +160,29 @@ downloaded signed-installer test remain necessary before a signed public release
 - Not validated: the user's own machine and DPI; the actual cause of the beta.9
   report remains inferred, so the visible bounds error message is the next
   diagnostic step if it recurs.
+
+## beta.11 game capture fix and publication (2026-09-13)
+
+- Reported from a real machine: selecting Counter-Strike 2 showed "New video
+  source is not ready; previous sources preserved" and the scene was never
+  applied. Cause: applyLayers required every newly created capture source to
+  report non-zero dimensions within three seconds before replacing the
+  composition. A game hook is injected and only delivers once the game draws, so
+  it routinely misses that window. Game layers are no longer awaited; camera,
+  window and display still are. Game matching moved to the executable
+  (priority 2), as upstream defaults, because a game retitles its window.
+- Engine self-test asserts the readiness rule directly (camera/window/display
+  awaited, game never, image/text/synthetic never): three checks. Protocol test,
+  33 checks, now also composes a game layer that is not rendering and adds one
+  during a live reconfigure, both of which previously failed; that section is
+  skipped when a game window is open on the machine so no one's game is captured.
+- 77 Node tests, layout smoke, UI smoke, native preview smoke and source audit
+  pass. Packaged app starts against a throwaway profile.
+- Installer 306687205 bytes, SHA-256
+  c7f1ee5d81cf31af03610b2d8e7520320477e08818a70a0d0b623c216e91b5d7, unsigned
+  beta. Published at the immutable URL; the signed manifest offers beta.11 to
+  beta.9 and beta.10 and reports beta.11 as current; the HTTPS download hash
+  matched.
+- Not validated: a real game hooked on this server, which has no game GPU;
+  anticheat refusal and Vulkan titles (the Vulkan layer is not registered by
+  this installer) remain known limits.

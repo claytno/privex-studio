@@ -25,6 +25,10 @@ Se o jogo continuar preto depois disso: jogos com anticheat podem recusar o
 hook, e nesse caso a fonte Tela inteira funciona. Jogos em Vulkan exigem a
 camada do OBS registrada no Windows, que este instalador não registra.
 
+Publicado em 2026-09-13 em `downloads/privex-studio/0.2.0-beta.11/` (306687205
+bytes, SHA-256 `c7f1ee5d81cf31af03610b2d8e7520320477e08818a70a0d0b623c216e91b5d7`);
+o `latest.json` assinado oferece a beta.11 às versões anteriores.
+
 Sem assinatura de publicador; identidade do instalador, perfil e chave de
 atualização inalterados. A captura de jogo não foi validada com um jogo real
 nesta máquina, que não tem GPU de jogo.
