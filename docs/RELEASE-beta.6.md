@@ -36,7 +36,11 @@ canto, a ocultação, o reaproveitamento e a rejeição de listas inválidas.
 ## Distribuição e limites
 
 O instalador mantém a identidade beta e a chave pública de atualização. Nada
-foi assinado com certificado de publicador nesta versão. Esta versão ainda não
+foi assinado com certificado de publicador nesta versão. Publicado em
+2026-09-13 em `downloads/privex-studio/0.2.0-beta.6/` (306052597 bytes,
+SHA-256 `ea98f313c654ec2690775f31c134f70a887d0d87f20336e16fe4e1693f39b6c1`);
+o manifesto `latest.json` assinado passou a oferecer a beta.6 a quem usa a
+beta.3 ou a beta.5 pelo atualizador do próprio app, fora de uma live. Esta versão ainda não
 foi validada com câmera física, imagem e transmissão real em outro aparelho;
 os testes automatizados usam apenas fontes sintéticas e janelas próprias.
 Posicionamento livre por arraste, filtros, transições e alertas animados de

@@ -88,3 +88,19 @@ downloaded signed-installer test remain necessary before a signed public release
   resize, pause/resume and release on stop.
 - Not validated: physical camera over a shared screen, real image files chosen by
   a person, prolonged broadcasts with scene switching, and the installer build.
+
+## beta.6 installer and publication (2026-09-13)
+
+- Packaged with the rebuilt engine (887 payload files, unsigned beta channel).
+  Installer 306052597 bytes, SHA-256
+  ea98f313c654ec2690775f31c134f70a887d0d87f20336e16fe4e1693f39b6c1, Authenticode
+  NotSigned. The packaged app started against a throwaway profile and stayed
+  running without spawning the engine before any device choice.
+- Published at the immutable URL under downloads/privex-studio/0.2.0-beta.6/
+  with SHA256SUMS.txt; the previous manifest is kept as
+  latest-before-beta.6.json outside the repository. The new latest.json was
+  signed with the existing Ed25519 key and validated with the shipping
+  updates.cjs: offered to 0.2.0-beta.5, not offered to 0.2.0-beta.6. A full
+  HTTPS download of the published file matched the built hash.
+- Not executed: the installer itself, an actual beta.5 to beta.6 upgrade on a
+  clean Windows user, and Smart App Control/SmartScreen behaviour.
