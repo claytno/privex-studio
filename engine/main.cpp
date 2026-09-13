@@ -65,6 +65,9 @@ bool captureKind(const QString &kind) { return kind == "camera" || kind == "wind
 const char *captureType(const QString &kind) { return kind == "camera" ? "dshow_input" : kind == "window" ? "window_capture" : kind == "game" ? "game_capture" : "monitor_capture"; }
 const char *captureProperty(const QString &kind) { return kind == "camera" ? "video_device_id" : kind == "window" || kind == "game" ? "window" : "monitor_id"; }
 const char *anyFullscreen = "any_fullscreen";
+// A camera, window or display should open at once, so it is awaited before it replaces a working scene.
+// A game hook waits for the game to render and may legitimately never deliver, so it is never awaited.
+bool awaitsFrames(const QString &kind) { return captureKind(kind) && kind != "game"; }
 
 // The audio callback retains numbers only; raw audio never crosses the native process.
 struct AudioMeter {
@@ -112,7 +115,7 @@ struct AudioMeter {
 };
 
 // One composed video layer. Index 0 of the requested list is the front-most layer, like a studio source list.
-struct Layer { QJsonObject spec; QString key; obs_source_t *source = nullptr; obs_sceneitem_t *item = nullptr; bool visible = true, capture = false, created = false, claimed = false; };
+struct Layer { QJsonObject spec; QString key; obs_source_t *source = nullptr; obs_sceneitem_t *item = nullptr; bool visible = true, capture = false, created = false, claimed = false, awaited = false; };
 struct PreviewRect { int x,y,width,height; };
 PreviewRect previewRectangle(const QJsonObject &bounds,int clientWidth,int clientHeight) {
  auto number=[](const QJsonObject &object,const char *key){const auto value=object.value(key);require(value.isDouble()&&std::isfinite(value.toDouble()),"Invalid preview bounds");return value.toDouble();};
@@ -309,7 +312,8 @@ struct Engine {
     // Upstream game hook: DirectX/OpenGL/Vulkan games, windowed or exclusive fullscreen. "any_fullscreen" waits for the next fullscreen game.
     obs_data_set_string(settings, "capture_mode", id == anyFullscreen ? "any_fullscreen" : "window");
     if (id != anyFullscreen) obs_data_set_string(settings, "window", id.toUtf8().constData());
-    obs_data_set_int(settings, "priority", 1); obs_data_set_bool(settings, "capture_cursor", true); obs_data_set_bool(settings, "anti_cheat_hook", true); obs_data_set_bool(settings, "capture_overlays", false);
+    obs_data_set_int(settings, "priority", 2 /* match the executable: a game retitles its window between menu, map and loading */);
+    obs_data_set_bool(settings, "capture_cursor", true); obs_data_set_bool(settings, "anti_cheat_hook", true); obs_data_set_bool(settings, "capture_overlays", false);
    } else obs_data_set_string(settings, captureProperty(kind), id.toUtf8().constData());
    // Windows Graphics Capture reads GPU-rendered windows (games, browsers); BitBlt returns black for them. The plugin falls back to BitBlt where WGC is unsupported.
    if (kind == "window") { obs_data_set_int(settings, "priority", 1); obs_data_set_int(settings, "method", 2); obs_data_set_bool(settings, "cursor", true); obs_data_set_bool(settings, "capture_audio", false); } // Exact selected title; never whole-screen fallback.
@@ -361,12 +365,17 @@ struct Engine {
   try {
    for (const auto &v : specs) {
     Layer layer; layer.spec = v.toObject(); layer.key = layerKey(layer.spec); layer.visible = layer.spec.value("visible").toBool(true); layer.capture = captureKind(layer.spec.value("kind").toString());
+    // A game hook only produces frames after the game renders, and legitimately waits while the game is
+    // closed or still loading. Requiring frames from it would refuse every scene change; devices that must
+    // open right away (camera, window, display) are still awaited before replacing a working composition.
+    layer.awaited = awaitsFrames(layer.spec.value("kind").toString());
     auto reuse = std::find_if(layers.begin(), layers.end(), [&](const Layer &old) { return !old.claimed && old.key == layer.key; });
     if (reuse != layers.end()) { reuse->claimed = true; layer.source = reuse->source; }
     else { layer.source = createLayerSource(layer.spec); layer.created = true; if (waitReady && layer.capture) { obs_source_inc_showing(layer.source); showing.push_back(layer.source); } }
+    // (created above; the showing reference lets the capture start while the previous composition is still on air)
     next.push_back(layer);
    }
-   if (waitReady) for (auto &layer : next) if (layer.created && layer.capture) {
+   if (waitReady) for (auto &layer : next) if (layer.created && layer.awaited) {
     for (int attempt = 0; attempt < 120 && (!obs_source_get_width(layer.source) || !obs_source_get_height(layer.source)); attempt++) Sleep(25);
     require(obs_source_get_width(layer.source) > 0 && obs_source_get_height(layer.source) > 0, "New video source is not ready; previous sources preserved");
    }
@@ -567,6 +576,9 @@ int testAudioMeters(){
 }
 QJsonObject synthetic(int w, int h, double color, const char *fit = "fit", const char *corner = "br", double size = 0.3) { return {{"kind","synthetic"},{"width",w},{"height",h},{"color",color},{"fit",fit},{"corner",corner},{"size",size}}; }
 int selfTest(Engine &e) {
+ require(awaitsFrames("camera") && awaitsFrames("window") && awaitsFrames("display"),"Real devices must be awaited before replacing a scene");
+ require(!awaitsFrames("game"),"A game hook must never block a scene change while the game is not rendering");
+ require(!awaitsFrames("image") && !awaitsFrames("text") && !awaitsFrames("synthetic"),"Only capture devices are awaited");
  const auto scaled=previewRectangle({{"x",10.25},{"y",20.5},{"width",200.5},{"height",112.75},{"viewport",QJsonObject{{"width",800},{"height",600}}}},1200,900);
  require(scaled.x==15&&scaled.y==31&&scaled.width==301&&scaled.height==169,"Preview CSS-to-physical edge rounding failed");
  const auto edge=previewRectangle({{"x",700.5},{"y",500.5},{"width",99.5},{"height",99.5},{"viewport",QJsonObject{{"width",800},{"height",600}}}},1200,900);
@@ -639,7 +651,7 @@ int selfTest(Engine &e) {
  obs_remove_raw_video_callback(testFrame, nullptr);
  e.videoEncoder = obs_video_encoder_create("obs_x264", "Synthetic encoder", nullptr, nullptr); e.audioEncoder = obs_audio_encoder_create("ffmpeg_aac", "Synthetic audio encoder", nullptr, 0, nullptr);
  require(e.videoEncoder && e.audioEncoder, "Bundled H264/AAC encoders unavailable");
- send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"validEmptyFrames",testEmptyFrames.load()}, {"previewGeometryChecks",4}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",9}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
+ send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"validEmptyFrames",testEmptyFrames.load()}, {"previewGeometryChecks",4}, {"sourceReadinessChecks",3}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",9}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
 }
 }
 int main(int argc, char **argv) {

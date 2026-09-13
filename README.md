@@ -8,9 +8,9 @@ Chat, moderation, goals and paid interactions use the authenticated service API.
 The Privex service is age-restricted and broadcasting requires an eligible,
 verified adult account. Building the client does not grant access to that service.
 
-**Status:** beta. The last production installer is 0.2.0-beta.9 and is unsigned.
-This repository prepares 0.2.0-beta.10 (preview placement restored, larger
-source settings sheet). SignPath Foundation approval and Windows
+**Status:** beta. The last production installer is 0.2.0-beta.10 and is unsigned.
+This repository prepares 0.2.0-beta.11 (game capture no longer blocks a scene
+change while the game is not rendering). SignPath Foundation approval and Windows
 publisher signing have not been obtained. Do not describe this build as signed
 or guaranteed to run with Smart App Control enabled.
 

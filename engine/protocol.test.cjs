@@ -13,6 +13,7 @@ assert.equal(syntheticResult.reconnectionStateChecks, 5);
 assert.equal(syntheticResult.sourceSwitchAndAudioChecks, 7);
 assert.equal(syntheticResult.layerCompositionChecks, 9);
 assert.equal(syntheticResult.previewGeometryChecks, 4);
+assert.equal(syntheticResult.sourceReadinessChecks, 3);
 assert.ok(syntheticResult.validEmptyFrames > 5);
 assert.ok(syntheticResult.validCornerFrames > 5);
 assert.ok(syntheticResult.validHiddenFrames > 5);
@@ -63,8 +64,20 @@ async function protocol() {
   assert.equal((await call('reconfigure',{layers:[{kind:'text',text:'Restaurada'}],width:1280,height:720,fps:30})).result.layers.length,1);
 
   assert.equal((await call('stop')).result.prepared, false);
-  // Never enable automatic fullscreen capture in a test: a user may have a game running.
   assert.equal((await call('prepare', {layers:[{kind:'game',id:'missing-window'}]})).ok, false);
+  // Only with no game window open on this machine: a game source that is not rendering must still compose,
+  // live included, instead of refusing the scene. Automatic fullscreen capture stays off when a game is running.
+  const detected = (await call('enumerate')).result.games;
+  if (detected.length === 1) {
+    const waiting = await call('prepare', {layers:[{kind:'game',id:'any_fullscreen'},{kind:'text',text:'Aguardando o jogo'}],width:1280,height:720,fps:30});
+    assert.equal(waiting.ok, true, JSON.stringify(waiting));
+    assert.equal(waiting.result.layers[0].kind, 'game');
+    assert.equal(waiting.result.layers[0].ready, false, 'no game is rendering, so the layer reports no signal');
+    const live = await call('reconfigure', {layers:[{kind:'text',text:'Sobreposto'},{kind:'game',id:'any_fullscreen'}],width:1280,height:720,fps:30,microphoneId:'',desktopId:''});
+    assert.equal(live.ok, true, 'adding a game source during a live scene change must not be refused: '+JSON.stringify(live));
+    assert.equal(live.result.layers.length, 2);
+    assert.equal((await call('stop')).result.prepared, false);
+  }
   assert.equal((await call('stop')).result.prepared, false);
   assert.equal((await call('mute', {muted:'yes'})).ok, false);
   assert.equal((await call('mute', {muted:true})).ok, true);
