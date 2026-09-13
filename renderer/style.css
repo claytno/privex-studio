@@ -75,10 +75,10 @@
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 
 /* Source settings sheet: sits over the docks, never over the preview, so the native preview keeps showing while you adjust. */
-.production{position:relative}.sheet-backdrop{position:absolute;inset:0;background:#05040899;z-index:5}
-.layer-dialog{position:absolute;left:14px;right:14px;bottom:12px;max-height:min(58%,380px);display:flex;flex-direction:column;background:#17151f;border:1px solid #4a3f63;border-radius:12px;box-shadow:0 18px 50px #000a;z-index:6;overflow:hidden}
-.layer-dialog>header{display:flex;align-items:center;gap:10px;padding:10px 12px 10px 16px;border-bottom:1px solid #2a2733}.layer-dialog h3{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:650;color:#efe6ff;margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.layer-dialog>header .dock-hint{flex:1;padding:0;text-align:right}.layer-dialog>header .icon-button{background:transparent;border:0;padding:6px;border-radius:6px;color:#b6acc8}
+.production{position:relative}.docks{position:relative}.sheet-backdrop{position:absolute;inset:0;background:#05040899;z-index:5}
+.layer-dialog{position:absolute;inset:0;max-height:100%;display:flex;flex-direction:column;background:#17151f;border:1px solid #4a3f63;border-radius:12px;box-shadow:0 8px 18px #0008;z-index:6;overflow:hidden}
+.layer-dialog>header{display:flex;align-items:center;gap:10px;padding:8px 12px;flex-shrink:0;border-bottom:1px solid #2a2733}.layer-dialog h3{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:650;color:#efe6ff;margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.layer-dialog>header .dock-hint{flex:1;padding:0;text-align:right}.layer-dialog>header .icon-button{background:transparent;border:0;padding:6px;border-radius:6px;color:#b6acc8}
 .layer-dialog .layer-props{border-top:0;background:transparent;padding:14px 16px;gap:10px 16px;flex:1 1 auto;overflow:auto}.layer-dialog .layer-props label{font-size:12px}.layer-dialog .layer-props select,.layer-dialog .layer-props input:not([type=range]){padding:9px 10px;font-size:13px}
-.layer-dialog>footer{display:flex;justify-content:space-between;gap:10px;padding:10px 16px;border-top:1px solid #2a2733;background:#131219}.layer-dialog>footer button{font-size:13px}
+.layer-dialog>footer{display:flex;flex-shrink:0;justify-content:space-between;gap:10px;padding:8px 12px;border-top:1px solid #2a2733;background:#131219}.layer-dialog>footer button{font-size:13px}
 
 .dock-empty p{margin:0 0 8px}.quick-add{display:flex;flex-wrap:wrap;gap:6px}.quick-add button{font-size:11px;padding:6px 9px}.dock-empty .fine{margin-top:8px}

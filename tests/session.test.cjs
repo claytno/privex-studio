@@ -11,6 +11,36 @@ const ownSession = (status = 'reserved') => ({ session: { id: ID, managed_by_dev
 const grant = { server: 'rtmps://ingest.example.test:1936', stream_key: 'synthetic-test-grant' };
 const equipment = { sourceType: 'camera', cameraId: 'explicit-camera', microphoneId: 'explicit-mic', portrait: true };
 
+test('prelive commerce requires confirmed account but never reserves or opens capture',async()=>{
+ const {subject,requests,engineCalls}=fixture();subject.configure({studio:null,prepared:false});
+ await subject.command('manager',{method:'GET',path:'/lives/commerce-preset'});
+ await subject.command('manager',{method:'PUT',path:'/lives/commerce-preset',body:{catalog_version:'fixture',items:[],goal:null}});
+ assert.equal(requests.length,2);assert.ok(requests.every(r=>r.route==='/obs/v1/manager/commerce-preset'));assert.equal(engineCalls.length,0);
+ await assert.rejects(subject.command('manager',{method:'GET',path:'/lives/'+ID+'/commerce'}),/sessão/);
+ subject.configure({user:null});await assert.rejects(subject.command('manager',{method:'GET',path:'/lives/commerce-preset'}),/Confirme/);
+});
+test('preview coordinates use CSS viewport without applying guessed monitor scaling twice',async()=>{
+ const {subject,engineCalls}=fixture();
+ subject.configure({win:{isDestroyed:()=>false,getContentSize:()=>[1440,800],webContents:{send(){},getZoomFactor:()=>1.25}}});
+ const rect={x:20.2,y:80.4,width:500.3,height:281.4,viewport:{width:1152,height:640}};
+ await subject.command('bounds',rect);
+ assert.equal(JSON.stringify(engineCalls.find(c=>c.name==='resize').data.bounds),JSON.stringify(rect));
+ await subject.command('bounds',{x:0,y:0,width:0,height:0});assert.equal(engineCalls.at(-1).data.visible,false);
+ await assert.rejects(subject.command('bounds',{...rect,viewport:{width:100,height:100}}),/mudou/);
+ assert.equal(engineCalls.at(-1).data.visible,false,'Invalid viewport must hide the old native child');
+});
+test('empty scene reconfigures existing preview instead of retaining deleted camera',async()=>{
+ const {subject,engineCalls}=fixture();await subject.command('prepare',equipment);
+ await subject.command('prepare',{layers:[],portrait:true,microphoneId:'explicit-mic'});
+ assert.equal(engineCalls.filter(c=>c.name==='reconfigure').at(-1).data.layers.length,0);
+ assert.equal(subject.state().mediaConfig.layers.length,0);assert.equal(subject.state().prepared,true);
+});
+test('starting an empty scene fails before reserving a live slot',async()=>{
+ const {subject,requests}=fixture();await subject.command('prepare',{layers:[]});
+ await assert.rejects(subject.command('start',{title:'Empty fixture'}),/Adicione uma fonte/);
+ assert.equal(requests.length,0);
+});
+
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -397,7 +427,7 @@ test('independent audio levels survive preparation and reject invalid IPC',async
 test('ending during a pending live source switch cannot restore preparation',async()=>{
  const {subject}=fixture();await subject.command('prepare',equipment);subject.configure({studio:ownSession('live'),transmitting:true});
  const pending=deferred();subject.configure({engine:{request:async(name)=>name==='reconfigure'?pending.promise:{}}});
- const changing=subject.command('prepare',{...equipment,cameraId:'second-camera'});await subject.command('end');pending.resolve({prepared:true});await changing;
+ const changing=subject.command('prepare',{...equipment,cameraId:'second-camera'});await subject.command('end');pending.resolve({prepared:true});await assert.rejects(changing,/cena cancelada/);
  assert.equal(subject.state().prepared,false);assert.equal(subject.state().transmitting,false);
 });
 
@@ -436,7 +466,7 @@ test('layered scenes reach the engine only through validated layers and an image
  const config=engineCalls.filter(c=>c.name==='prepare').at(-1).data;
  assert.equal(config.layers.length,3);assert.equal(config.layers[0].kind,'camera');assert.equal(config.layers[0].corner,'tl');assert.equal(config.sourceType,'camera');assert.equal(config.width,1280);
  await assert.rejects(subject.command('prepare',{layers:[{kind:'image',file:'C:\anywhere\secret.png'}]}),/seletor/,'renderer cannot point the engine at arbitrary files');
- await assert.rejects(subject.command('prepare',{layers:new Array(7).fill({kind:'text',text:'x'})}),/1 a 6/);
+ await assert.rejects(subject.command('prepare',{layers:new Array(7).fill({kind:'text',text:'x'})}),/até 6/);
  assert.equal(engineCalls.filter(c=>c.name==='prepare'||c.name==='reconfigure').length,1);
 });
 

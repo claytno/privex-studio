@@ -11,7 +11,9 @@ assert.ok(syntheticResult.validOverlayFrames > 5);
 assert.equal(syntheticResult.pauseRestoresMute, true);
 assert.equal(syntheticResult.reconnectionStateChecks, 5);
 assert.equal(syntheticResult.sourceSwitchAndAudioChecks, 7);
-assert.equal(syntheticResult.layerCompositionChecks, 4);
+assert.equal(syntheticResult.layerCompositionChecks, 9);
+assert.equal(syntheticResult.previewGeometryChecks, 4);
+assert.ok(syntheticResult.validEmptyFrames > 5);
 assert.ok(syntheticResult.validCornerFrames > 5);
 assert.ok(syntheticResult.validHiddenFrames > 5);
 assert.equal(syntheticResult.audioMeterChecks, 8);
@@ -36,7 +38,11 @@ async function protocol() {
   assert.equal(devices.result.games[0].id, 'any_fullscreen');
   assert.equal((await call('prepare', {sourceType:'camera',cameraId:'missing-device'})).ok, false);
   assert.equal((await call('status')).result.prepared, false);
-  assert.equal((await call('prepare', {layers:[]})).ok, false);
+  const emptyScene=await call('prepare',{layers:[],width:1280,height:720,fps:30});
+  assert.equal(emptyScene.ok,true);assert.equal(emptyScene.result.layers.length,0);assert.equal(emptyScene.result.prepared,true);
+  assert.equal((await call('scene',{mode:'pause'})).result.sceneMode,'pause');assert.equal((await call('scene',{mode:'live'})).result.sceneMode,'live');
+  assert.equal((await call('start',{server:'rtmps://127.0.0.1:65534/live',streamKey:'SYNTHETIC_SECRET_NOT_TO_LOG'})).ok,false,'Empty initial scene cannot publish');
+  assert.equal((await call('stop')).result.prepared,false);
   assert.equal((await call('prepare', {layers:[{kind:'image',file:'C:/missing/privex-missing.png'}]})).ok, false, 'Missing image must be refused');
   assert.equal((await call('prepare', {layers:[{kind:'text',text:'   '}]})).ok, false, 'Blank text must be refused');
   assert.equal((await call('layer', {index:0,visible:false})).ok, false, 'Layer toggles need prepared capture');
@@ -47,12 +53,17 @@ async function protocol() {
   assert.equal(composed.layers[0].ready, true, 'Text layers render on the GPU without any capture device'); assert.ok(composed.sourceWidth > 0);
   assert.equal((await call('layer', {index:1,visible:false})).result.layers[1].visible, false);
   assert.equal((await call('layer', {index:2,visible:false})).ok, false);
+  assert.equal((await call('layer', {index:0.5,visible:false})).ok, false, 'Fractional index cannot toggle a different layer');
   assert.equal((await call('reconfigure', {layers:[{kind:'text',text:'Trocado'}],width:1280,height:720,fps:30,microphoneId:'',desktopId:''})).result.layers.length, 1);
   assert.equal((await call('reconfigure', {layers:[{kind:'camera',id:'missing-device'}],width:1280,height:720,fps:30})).ok, false, 'Unavailable device preserves the composition');
   assert.equal((await call('status')).result.layers.length, 1);
+  const emptied=await call('reconfigure',{layers:[],width:1280,height:720,fps:30,microphoneId:'',desktopId:''});
+  assert.equal(emptied.ok,true);assert.equal(emptied.result.layers.length,0);assert.equal(emptied.result.prepared,true);assert.equal(emptied.result.sourceWidth,0);
+  assert.equal((await call('scene',{mode:'pause'})).result.sceneMode,'pause');assert.equal((await call('scene',{mode:'live'})).result.sceneMode,'live');
+  assert.equal((await call('reconfigure',{layers:[{kind:'text',text:'Restaurada'}],width:1280,height:720,fps:30})).result.layers.length,1);
+
   assert.equal((await call('stop')).result.prepared, false);
-  const game = await call('prepare', {layers:[{kind:'game',id:'any_fullscreen'},{kind:'text',text:'Aguardando o jogo'}],width:1280,height:720,fps:30});
-  assert.equal(game.ok, true, JSON.stringify(game)); assert.equal(game.result.layers[0].kind, 'game'); assert.equal(game.result.layers[0].ready, false, 'No fullscreen game is running in the test');
+  // Never enable automatic fullscreen capture in a test: a user may have a game running.
   assert.equal((await call('prepare', {layers:[{kind:'game',id:'missing-window'}]})).ok, false);
   assert.equal((await call('stop')).result.prepared, false);
   assert.equal((await call('mute', {muted:'yes'})).ok, false);
@@ -63,7 +74,7 @@ async function protocol() {
   const timeout = setTimeout(() => child.kill(), 10000);
   assert.equal(await exited, 0); clearTimeout(timeout);
   assert.equal(stderr, '');
-  process.stdout.write(JSON.stringify({ok:true,synthetic:syntheticResult,protocolChecks:26,deviceEnumeration:true,eofCleanup:true,networkPublish:false})+'\n');
+  process.stdout.write(JSON.stringify({ok:true,synthetic:syntheticResult,protocolChecks:33,deviceEnumeration:true,eofCleanup:true,networkPublish:false})+'\n');
  } finally { child.kill(); }
 }
 protocol().catch(error => { console.error(error.message); process.exitCode = 1; });

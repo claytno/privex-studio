@@ -113,6 +113,27 @@ struct AudioMeter {
 
 // One composed video layer. Index 0 of the requested list is the front-most layer, like a studio source list.
 struct Layer { QJsonObject spec; QString key; obs_source_t *source = nullptr; obs_sceneitem_t *item = nullptr; bool visible = true, capture = false, created = false, claimed = false; };
+struct PreviewRect { int x,y,width,height; };
+PreviewRect previewRectangle(const QJsonObject &bounds,int clientWidth,int clientHeight) {
+ auto number=[](const QJsonObject &object,const char *key){const auto value=object.value(key);require(value.isDouble()&&std::isfinite(value.toDouble()),"Invalid preview bounds");return value.toDouble();};
+ const double x=number(bounds,"x"),y=number(bounds,"y"),w=number(bounds,"width"),h=number(bounds,"height");
+ require(x>=0&&y>=0&&x<=32768&&y<=32768&&w>0&&h>0&&w<=8192&&h<=8192,"Invalid preview bounds");
+ double scaleX=1,scaleY=1;
+ if(bounds.contains("viewport")) {
+  require(bounds.value("viewport").isObject(),"Invalid preview viewport");const auto viewport=bounds.value("viewport").toObject();
+  const double viewportWidth=number(viewport,"width"),viewportHeight=number(viewport,"height");
+  require(viewportWidth>0&&viewportHeight>0&&viewportWidth<=32768&&viewportHeight<=32768&&clientWidth>0&&clientHeight>0,"Invalid preview viewport");
+  require(x+w<=viewportWidth+.01&&y+h<=viewportHeight+.01,"Preview bounds must fit the Studio window");
+  scaleX=clientWidth/viewportWidth;scaleY=clientHeight/viewportHeight;
+  // DPI and browser zoom scale both axes. A mismatched viewport is stale or not this client area.
+  require(std::abs(scaleX-scaleY)<=std::max(scaleX,scaleY)*.02+2/std::min(viewportWidth,viewportHeight),"Preview viewport must match the Studio client area");
+ }
+ const int left=int(std::lround(x*scaleX)),top=int(std::lround(y*scaleY));
+ const int right=int(std::lround((x+w)*scaleX)),bottom=int(std::lround((y+h)*scaleY));
+ require(right>left&&bottom>top&&right-left<=8192&&bottom-top<=8192,"Invalid preview bounds");
+ require(left>=0&&top>=0&&right<=clientWidth&&bottom<=clientHeight,"Preview bounds must fit the Studio window");
+ return {left,top,right-left,bottom-top};
+}
 struct Box { int x, y, w, h; uint32_t align; };
 
 struct Engine {
@@ -191,14 +212,14 @@ struct Engine {
   obs_source_video_render(obs_scene_get_source(e->scene)); gs_projection_pop(); gs_viewport_pop();
  }
  void resize(const QJsonObject &bounds) {
-  int x = bounds.value("x").toInt(), y = bounds.value("y").toInt(), w = bounds.value("width").toInt(640), h = bounds.value("height").toInt(360);
-  require(x >= 0 && y >= 0 && x <= 32768 && y <= 32768 && w > 0 && h > 0 && w <= 8192 && h <= 8192, "Invalid preview bounds");
-  if (preview) {
-   RECT client{}; require(GetClientRect(GetParent(preview), &client), "Preview parent is unavailable");
-   if (x + w > client.right || y + h > client.bottom) { ShowWindow(preview, SW_HIDE); previewPositioned = false; throw std::runtime_error("Preview bounds must fit the Studio window"); }
-   require(SetWindowPos(preview, HWND_TOP, x, y, w, h, SWP_NOACTIVATE), "Could not position preview"); previewPositioned = true;
-  }
-  if (display) obs_display_resize(display, w, h);
+  try {
+   RECT client{0,0,32768,32768};
+   if(preview) require(GetClientRect(GetParent(preview),&client),"Preview parent is unavailable");
+   else require(!bounds.contains("viewport"),"Preview parent is unavailable");
+   const auto r=previewRectangle(bounds,client.right-client.left,client.bottom-client.top);
+   if(preview){require(SetWindowPos(preview,HWND_TOP,r.x,r.y,r.width,r.height,SWP_NOACTIVATE),"Could not position preview");previewPositioned=true;}
+   if(display)obs_display_resize(display,r.width,r.height);
+  }catch(...){if(preview)ShowWindow(preview,SW_HIDE);previewPositioned=false;throw;}
  }
  void attachPreview(const QJsonObject &args) {
   if (!args.contains("parentHwnd")) return;
@@ -265,7 +286,7 @@ struct Engine {
  QJsonArray layerSpecs(const QJsonObject &args) {
   QJsonArray specs;
   if (args.contains("layers")) {
-   require(args.value("layers").isArray(), "Invalid layers"); const auto items = args.value("layers").toArray(); require(items.size() >= 1 && items.size() <= 8, "Scene needs 1 to 8 sources");
+   require(args.value("layers").isArray(), "Invalid layers"); const auto items = args.value("layers").toArray(); require(items.size() <= 8, "Scene allows up to 8 sources");
    for (const auto &v : items) { require(v.isObject(), "Invalid layer"); specs.append(normalizeLayer(v.toObject())); }
    return specs;
   }
@@ -314,20 +335,29 @@ struct Engine {
   obs_sceneitem_defer_update_end(item);
  }
  struct Swap { Engine *engine; std::vector<Layer> *next; bool failed; };
+ int selfTestFailLayerAfter = -1; // Only --self-test can enable this local fault injection.
  void swapLayersLocked(std::vector<Layer> &next, bool &failed) {
-  for (auto &old : layers) { if (old.item) obs_sceneitem_remove(old.item); old.item = nullptr; }
-  // Index 0 is the front-most layer: add it last so it renders above the others.
+  // Stage invisible items first. Allocation failure must not remove the current composition.
   for (auto it = next.rbegin(); it != next.rend(); ++it) {
-   auto *item = obs_scene_add(scene, it->source); if (!item) { failed = true; continue; }
-   obs_sceneitem_set_visible(item, false); placeLayer(item, it->spec); obs_sceneitem_set_visible(item, it->visible && !paused); it->item = item;
+   auto *item = diagnosticSelfTest && selfTestFailLayerAfter == 0 ? nullptr : obs_scene_add(scene, it->source);
+   if (diagnosticSelfTest && selfTestFailLayerAfter > 0) selfTestFailLayerAfter--;
+   if (!item) { failed = true; break; }
+   obs_sceneitem_set_visible(item, false); placeLayer(item, it->spec); it->item = item;
   }
+  if (failed) {
+   for (auto &layer : next) { if (layer.item) obs_sceneitem_remove(layer.item); layer.item = nullptr; }
+   return;
+  }
+  for (auto &old : layers) { if (old.item) obs_sceneitem_remove(old.item); old.item = nullptr; }
+  // Index 0 is the front-most layer: it was added last so renders above the others.
+  for (auto &layer : next) obs_sceneitem_set_visible(layer.item, layer.visible && !paused);
   for (auto [source, item] : pauseSources) obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
   for (auto [source, item] : overlaySources) obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
  }
  // Replaces the composed layers. Unchanged sources are reused so a camera is not reopened; on failure nothing changes.
  void applyLayers(const QJsonArray &specs, bool waitReady) {
   require(scene, "Canvas unavailable");
-  std::vector<Layer> next; std::vector<obs_source_t *> showing;
+  std::vector<Layer> next; std::vector<obs_source_t *> showing; next.reserve(specs.size()); showing.reserve(specs.size());
   try {
    for (const auto &v : specs) {
     Layer layer; layer.spec = v.toObject(); layer.key = layerKey(layer.spec); layer.visible = layer.spec.value("visible").toBool(true); layer.capture = captureKind(layer.spec.value("kind").toString());
@@ -348,9 +378,14 @@ struct Engine {
   }
   Swap swap{this, &next, false};
   obs_scene_atomic_update(scene, [](void *data, obs_scene_t *) { auto *s = static_cast<Swap *>(data); s->engine->swapLayersLocked(*s->next, s->failed); }, &swap);
+  if (swap.failed) {
+   for (auto *s : showing) obs_source_dec_showing(s);
+   for (auto &layer : next) if (layer.created && layer.source) obs_source_release(layer.source);
+   for (auto &old : layers) old.claimed = false;
+   throw std::runtime_error("Could not compose scene layer; previous sources preserved");
+  }
   for (auto &old : layers) if (!old.claimed && old.source) obs_source_release(old.source);
   layers = std::move(next); for (auto *s : showing) obs_source_dec_showing(s);
-  require(!swap.failed, "Could not compose scene layer");
  }
  void setLayerVisible(int index, bool visible) {
   require(prepared && index >= 0 && index < int(layers.size()), "Layer unavailable");
@@ -365,7 +400,7 @@ struct Engine {
   return result;
  }
  void setScene(const QString &mode) {
-  require(prepared && scene && !layers.empty(),"Prepare video before selecting a scene"); require(mode == "pause" || mode == "live","Invalid scene mode");
+  require(prepared && scene,"Prepare video before selecting a scene"); require(mode == "pause" || mode == "live","Invalid scene mode");
   if (mode == "pause" && pauseSources.empty()) {
    addLayerSource(pauseSources,colorSource("Privex interval background",width,height,0xff181018),0,0);
    addLayerSource(pauseSources,textSource("Privex interval title",QString::fromUtf8("Voltamos em instantes"),width < height ? 38 : 48,width-96,180),48,float(height/2-70));
@@ -416,9 +451,10 @@ struct Engine {
   require(args.value("width").toInt()==width && args.value("height").toInt()==height && args.value("fps").toInt()==fps,"End the stream before changing canvas format");
   const auto specs = layerSpecs(args);
   auto microphoneId=args.value("microphoneId").toString(),desktopId=args.value("desktopId").toString();
-  require(microphoneId.isEmpty() || hasId(list("wasapi_input_capture","device_id"),microphoneId),"Selected microphone is unavailable");
-  require(desktopId.isEmpty() || hasId(list("wasapi_output_capture","device_id"),desktopId),"Selected desktop audio is unavailable");
   bool changeMic=microphoneId!=captureConfig.value("microphoneId").toString(),changeDesktop=desktopId!=captureConfig.value("desktopId").toString();
+  // A disconnected existing device must not prevent removing or rearranging video.
+  require(!changeMic || microphoneId.isEmpty() || hasId(list("wasapi_input_capture","device_id"),microphoneId),"Selected microphone is unavailable");
+  require(!changeDesktop || desktopId.isEmpty() || hasId(list("wasapi_output_capture","device_id"),desktopId),"Selected desktop audio is unavailable");
   obs_source_t *nextMic=nullptr,*nextDesktop=nullptr;
   auto createAudio=[](const char *sourceType,const char *name,const QString &id) {
    if(id.isEmpty()) return static_cast<obs_source_t *>(nullptr);
@@ -487,7 +523,7 @@ struct Engine {
  QJsonObject audioLevels(){return {{"microphone",micMeter.read(mic)},{"desktop",desktopMeter.read(desktop)}};}
 };
 
-std::atomic<int> testFrames = 0, testFitFrames = 0, testStage = 0, testPauseFrames = 0, testOverlayFrames = 0, testCornerFrames = 0, testHiddenFrames = 0;
+std::atomic<int> testFrames = 0, testFitFrames = 0, testStage = 0, testPauseFrames = 0, testOverlayFrames = 0, testCornerFrames = 0, testHiddenFrames = 0, testEmptyFrames = 0;
 void testFrame(void *, video_data *frame) {
  testFrames++;
  // Portrait canvas, full landscape source: center white, top/bottom letterbox black.
@@ -501,6 +537,7 @@ void testFrame(void *, video_data *frame) {
  auto *cornerPx = pixel(550,1180), *besideCorner = pixel(100,1180);
  if (testStage == 3 && cornerPx[2] > 200 && cornerPx[1] < 60 && cornerPx[0] < 60 && besideCorner[0] < 20 && besideCorner[2] < 20 && center[0] > 230) testCornerFrames++;
  if (testStage == 4 && cornerPx[0] < 20 && cornerPx[1] < 20 && cornerPx[2] < 20 && center[0] > 230) testHiddenFrames++;
+ if (testStage == 5 && top[0] < 20 && top[1] < 20 && top[2] < 20 && center[0] < 20 && center[1] < 20 && center[2] < 20 && bottom[0] < 20 && bottom[1] < 20 && bottom[2] < 20) testEmptyFrames++;
 }
 int testAudioMeters(){
  require(AudioMeter::boundedDb(-INFINITY)==-60 && AudioMeter::boundedDb(NAN)==-60 && AudioMeter::boundedDb(12)==0 && AudioMeter::boundedDb(-12)==-12,"Meter numerical bounds failed");
@@ -530,6 +567,14 @@ int testAudioMeters(){
 }
 QJsonObject synthetic(int w, int h, double color, const char *fit = "fit", const char *corner = "br", double size = 0.3) { return {{"kind","synthetic"},{"width",w},{"height",h},{"color",color},{"fit",fit},{"corner",corner},{"size",size}}; }
 int selfTest(Engine &e) {
+ const auto scaled=previewRectangle({{"x",10.25},{"y",20.5},{"width",200.5},{"height",112.75},{"viewport",QJsonObject{{"width",800},{"height",600}}}},1200,900);
+ require(scaled.x==15&&scaled.y==31&&scaled.width==301&&scaled.height==169,"Preview CSS-to-physical edge rounding failed");
+ const auto edge=previewRectangle({{"x",700.5},{"y",500.5},{"width",99.5},{"height",99.5},{"viewport",QJsonObject{{"width",800},{"height",600}}}},1200,900);
+ require(edge.x+edge.width==1200&&edge.y+edge.height==900,"Fractional preview edges must fit parent client exactly");
+ const auto legacy=previewRectangle({{"x",10},{"y",20},{"width",200},{"height",100}},1200,900);
+ require(legacy.x==10&&legacy.width==200,"Legacy physical preview bounds changed");
+ bool boundsRejected=false;try{previewRectangle({{"x",0},{"y",0},{"width",200},{"height",100},{"viewport",QJsonObject{{"width",800},{"height",400}}}},1200,900);}catch(const std::exception &){boundsRejected=true;}
+ require(boundsRejected,"Mismatched client viewport must be refused");
  const auto beforeDisconnect = publishState(true, false, true, true);
  require(QString::fromLatin1(beforeDisconnect.name) == "streaming" && beforeDisconnect.streaming, "Connected output must be streaming");
  const auto duringReconnect = publishState(true, true, true, true);
@@ -578,10 +623,23 @@ int selfTest(Engine &e) {
  require(e.layers[1].source==baseSource && e.layers[0].source!=cornerSource && e.layers[0].visible,"Unchanged layers must keep their source; changed placement recreates only that layer");
  refused=false;try{e.applyLayers(QJsonArray{e.normalizeLayer(QJsonObject{{"kind","text"},{"text","   "}})},false);}catch(const std::exception &){refused=true;}
  require(refused && e.layers.size()==2 && e.layers[1].source==baseSource,"Invalid layer list must preserve the current composition");
+ auto *oldItem=e.layers[0].item;auto *oldSource=e.layers[0].source;e.starting=true;e.selfTestFailLayerAfter=1;
+ const QJsonArray staged{e.normalizeLayer(synthetic(640,360,green,"corner","br",.3)),e.normalizeLayer(synthetic(1280,720,white))};
+ refused=false;try{e.applyLayers(staged,false);}catch(const std::exception &){refused=true;}
+ e.selfTestFailLayerAfter=-1;
+ require(refused&&e.layers[0].item==oldItem&&e.layers[0].source==oldSource&&e.layers[1].source==baseSource&&e.active(),"Partial scene insertion failure must retain previous items and publishing");
+ e.applyLayers(staged,false);require(e.layers[1].source==baseSource,"Retry after partial failure must retain reusable sources");
+ auto *sameMic=e.mic,*sameDesktop=e.desktop;
+ e.captureConfig.insert("microphoneId","synthetic-disconnected-mic");e.captureConfig.insert("desktopId","synthetic-disconnected-desktop");
+ e.reconfigure({{"width",720},{"height",1280},{"fps",30},{"layers",QJsonArray{}},{"microphoneId","synthetic-disconnected-mic"},{"desktopId","synthetic-disconnected-desktop"}});
+ require(e.layers.empty()&&e.prepared&&e.active()&&e.scene==sameScene&&e.mic==sameMic&&e.desktop==sameDesktop&&!e.videoReady(),"Removing last source must retain canvas, audio and publishing");
+ testStage=5;Sleep(500);require(testEmptyFrames>5,"Removed sources must disappear from rendered video");
+ e.setScene("pause");require(e.paused&&obs_source_muted(e.desktop),"Empty canvas must still permit interval");e.setScene("live");require(!e.paused&&!obs_source_muted(e.desktop),"Empty canvas must restore audio after interval");
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280,720,white))},false);require(e.videoReady()&&e.active(),"Adding a source back after empty canvas must preserve publishing");e.starting=false;
  obs_remove_raw_video_callback(testFrame, nullptr);
  e.videoEncoder = obs_video_encoder_create("obs_x264", "Synthetic encoder", nullptr, nullptr); e.audioEncoder = obs_audio_encoder_create("ffmpeg_aac", "Synthetic audio encoder", nullptr, 0, nullptr);
  require(e.videoEncoder && e.audioEncoder, "Bundled H264/AAC encoders unavailable");
- send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",4}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
+ send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"validEmptyFrames",testEmptyFrames.load()}, {"previewGeometryChecks",4}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",9}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
 }
 }
 int main(int argc, char **argv) {
@@ -608,7 +666,7 @@ int main(int argc, char **argv) {
     if (command == "enumerate") result = engine.enumerate();
     else if (command == "prepare") { try { result = engine.prepare(args); } catch (...) { if (!engine.active()) engine.clearSources(); throw; } }
     else if (command == "reconfigure") result = engine.reconfigure(args);
-    else if (command == "layer") { require(args.value("index").isDouble() && args.value("visible").isBool(), "Invalid layer request"); engine.setLayerVisible(args.value("index").toInt(), args.value("visible").toBool()); result = engine.status(); }
+    else if (command == "layer") { const auto index=args.value("index");require(index.isDouble() && std::isfinite(index.toDouble()) && std::floor(index.toDouble())==index.toDouble() && index.toDouble()>=0 && index.toDouble()<8 && args.value("visible").isBool(), "Invalid layer request"); engine.setLayerVisible(index.toInt(), args.value("visible").toBool()); result = engine.status(); }
     else if (command == "volume") { engine.volume(args); result=engine.status(); }
     else if (command == "start") { try { result = engine.start(args); } catch (...) { if (!engine.active()) engine.releaseOutput(); throw; } }
     else if (command == "stop") { engine.releaseOutput(); engine.clearSources(); result = engine.status(); }

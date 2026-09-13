@@ -47,7 +47,7 @@ test('prepare input accepts explicit layers and keeps the single-source form for
   assert.deepEqual(legacy.layers, [{kind: 'window', id: 'win-1', fit: 'fit', corner: 'br', size: 0.3, visible: true, name: ''}]);
   const layered = prepareInput({layers: [{kind: 'text', text: 'Oi', fit: 'corner', corner: 'bl'}, {kind: 'display', id: 'm1'}], microphoneId: 'mic'});
   assert.equal(layered.sourceType, 'display'); assert.equal(layered.layers.length, 2); assert.equal(layered.layers[0].corner, 'bl');
-  assert.throws(() => prepareInput({layers: []}), /1 a 6/);
+  assert.deepEqual(prepareInput({layers: []}).layers, []);
   assert.throws(() => prepareInput({layers: [{kind: 'camera', id: ''}]}), /equipamento/);
   assert.throws(() => layerInput({kind: 'text', text: 'a\u0000b'}, new Set()), /Texto/);
   assert.throws(() => prepareInput({layers: [{kind: 'image', file: 'C:\\x.png', server: 'rtmp://evil'}]}), /seletor/);

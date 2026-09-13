@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),output=path.join(root,'test-results','la
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const id='01234567-89ab-4cde-8fab-0123456789ab';
 const user={id:101,username:'conta_sintetica',name:'Conta de demonstração'};
-let state={version:'teste-local',pendingAccount:user,user:null,studio:null,prepared:false,busy:false};const calls=[];let equipment={cameras:[],microphones:[],desktops:[],windows:[],displays:[],games:[{id:'any_fullscreen',name:'Qualquer jogo em tela cheia'}]};
+let state={version:'teste-local',pendingAccount:user,user:null,studio:null,prepared:false,busy:false};const calls=[];let prepareLocks=0,saveLocks=0;let equipment={cameras:[],microphones:[],desktops:[],windows:[],displays:[],games:[{id:'any_fullscreen',name:'Qualquer jogo em tela cheia'}]};
 const last=command=>calls.filter(c=>c.command===command).at(-1);
 protocol.registerSchemesAsPrivileged([{scheme:'privex',privileges:{standard:true,secure:true,supportFetchAPI:true}}]);
 app.setPath('userData',path.join(output,'profile'));
@@ -16,11 +16,13 @@ app.whenReady().then(async()=>{let win;try{
  ipcMain.handle('studio:command',async(_event,command,payload)=>{
   calls.push({command,payload});if(command==='snapshot')return{ok:true,data:state};
   if(command==='enumerate')return{ok:true,data:equipment};
+  if(command==='prepare'&&prepareLocks-->0)return{ok:false,status:423,error:'Synthetic heartbeat lock'};
+  if(command==='layout.save'&&saveLocks-->0)return{ok:false,status:423,error:'Synthetic save lock'};
   if(command==='volume'){await delay(40);return{ok:false,error:'Synthetic audio rejection'};}
   if(command==='image.pick')return{ok:true,data:{file:'C:\\synthetic\\logo.png',name:'logo.png'}};
   if(command==='manager'){
    const route=payload.path;
-   if(route.endsWith('/commerce'))return{ok:true,data:{permissions:{manage:true},catalog_version:1,items:[{id:3,kind:'action',title:'Ação de demonstração',amount_cents:500,active:true,delivery_seconds:300,outcomes:[]}],goal:{title:'Meta de teste',active:true,target_cents:10000,raised_cents:0}}};
+   if(route.endsWith('/commerce')||route==='/lives/commerce-preset')return{ok:true,data:{permissions:{manage:true},catalog_version:1,items:[{id:3,kind:'action',title:'Ação de demonstração',amount_cents:500,active:true,delivery_seconds:300,outcomes:[]}],goal:{title:'Meta de teste',active:true,target_cents:10000,raised_cents:0}}};
    if(route.includes('/accounting'))return{ok:true,data:{received:{net_cents:500,gross_cents:500,refunded_cents:0}}};
    if(route.includes('/orders'))return{ok:true,data:{data:[{id:17,live_session_id:id,title:'Presente de teste',kind:'gift',status:'completed',amount_cents:500,allowed_actions:['refund'],created_at:'2026-09-13T00:00:00Z'}],last_page:1}};
    return{ok:true,data:{messages:[],enabled:true,can_send:true,moderation:{can_moderate:true},rules:'',data:[]}};
@@ -43,7 +45,7 @@ app.whenReady().then(async()=>{let win;try{
  // Fresh installation: no saved layout, preview closed. Discovery suggests devices but never starts capture.
  state={version:'teste-local',user,pendingAccount:null,studio:{session:{id,status:'reserved',managed_by_device:true}},prepared:false,transmitting:false,busy:false,muted:false,layout:{version:1,scenes:[{id:'principal',name:'Principal',layers:[]}],activeScene:'principal',microphoneId:'',desktopId:'',portrait:false,fresh:true}};win.webContents.send('studio:state',state);await delay(300);
  assert.equal(await js("document.querySelectorAll('.layer-list li').length"),0);
- assert.equal(await js("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Abrir prévia')).disabled"),true,'No source means nothing to preview');
+ assert.equal(await js("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Abrir prévia')).disabled"),false,'An empty scene can explicitly show a black frame without adding a camera');
  equipment={...equipment,cameras:[{id:'synthetic-camera',name:'Synthetic camera'}],microphones:[{id:'default',name:'Windows default'}]};
  await click('[aria-label="Atualizar equipamentos"]');await delay(150);
  assert.equal(await js("document.querySelectorAll('.layer-list li').length"),1,'A first camera attached after empty discovery should be suggested as the only source');
@@ -55,7 +57,7 @@ app.whenReady().then(async()=>{let win;try{
  await delay(700);const saved=last('layout.save');assert.ok(saved,'Scenes are persisted for this computer');assert.equal(saved.payload.scenes[0].layers[0].kind,'camera');assert.equal(saved.payload.microphoneId,'');
  await clickText('button','Abrir prévia');await delay(100);
  const opened=last('prepare');assert.ok(opened,'Opening the preview is the explicit capture consent');assert.equal(opened.payload.layers.length,1);assert.equal(opened.payload.layers[0].id,'synthetic-camera');assert.equal(opened.payload.layers[0].fit,'fit');assert.equal(opened.payload.microphoneId,'');
- // Preview open: composition edits are applied automatically and cheap toggles use the layer command.
+ // Preview open: all composition edits share one serialized latest-wins queue.
  state={...state,prepared:true};win.webContents.send('studio:state',state);await delay(250);
  win.webContents.send('studio:audio-levels',{microphone:{configured:true,receiving:true,muted:false,state:'receiving',inputDb:0,outputDb:-12,inputClipping:true,outputClipping:false},desktop:{configured:true,receiving:false,state:'unavailable'}});await delay(80);
  assert.equal(await js("document.querySelector('[aria-label=\"Microfone · Entrada\"]').getAttribute('aria-valuenow')"),'0');
@@ -76,14 +78,23 @@ app.whenReady().then(async()=>{let win;try{
  await click('[aria-label="Fechar ajustes"]');await delay(100);assert.equal(await js("!!document.querySelector('.layer-dialog')"),false);
  await click('.layer-list li:nth-child(2) .layer-main');await delay(100);assert.ok(await js("document.querySelector('.layer-dialog h3').textContent.includes('Synthetic camera')"),'Clicking a source opens its sheet');
  await js("document.querySelector('.layer-dialog').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))");await delay(100);assert.equal(await js("!!document.querySelector('.layer-dialog')"),false,'Escape closes the sheet');
- await click('.layer-list li:nth-child(2) [aria-label="Ocultar fonte"]');await delay(150);
- const toggled=last('layer');assert.ok(toggled,'Visibility uses the cheap layer command');assert.equal(toggled.payload.index,1);assert.equal(toggled.payload.visible,false);
- await delay(600);assert.equal(calls.filter(c=>c.command==='prepare').length,prepares+2,'A visibility toggle must not re-prepare the whole scene');
+ await click('.layer-list li:nth-child(2) [aria-label="Ocultar fonte"]');await delay(600);
+ assert.equal(last('prepare').payload.layers[1].visible,false,'Visibility follows the same serialized composition, never an index from a stale scene');
+ assert.equal(calls.filter(c=>c.command==='prepare').length,prepares+3);
  await click('[aria-label="Adicionar fonte"]');await delay(50);await clickText('.add-panel button','Imagem');await delay(600);await click('[aria-label="Fechar ajustes"]');await delay(50);
  assert.ok(calls.some(c=>c.command==='image.pick'),'Images come from the native picker only');assert.equal(last('prepare').payload.layers[0].file,'C:\\synthetic\\logo.png');
  assert.equal(await js("!![...document.querySelectorAll('button')].find(b=>b.textContent.includes('Fechar prévia'))"),false,'The preview cannot be closed while a session is reserved or live');
  state={...state,studio:{session:null}};win.webContents.send('studio:state',state);await delay(150);
  await clickText('button','Fechar prévia');await delay(100);assert.ok(calls.some(c=>c.command==='preview.close'),'Closing the preview is explicit');
+ state={...state,prepared:false};win.webContents.send('studio:state',state);await delay(100);
+ const beforePreset=calls.length;
+ await js("[...document.querySelectorAll('[role=tab]')].find(b=>b.textContent.includes('Interações')).click()");await delay(400);
+ assert.ok(await js("document.querySelector('.manager-content').textContent.includes('Prepare suas interações')"));
+ assert.equal(await js("!!document.querySelector('.revenue-panel')"),false,'Prelive must not render revenue from another session');
+ await clickText('.manager-content button','Salvar interações');await delay(200);
+ const presetCalls=calls.slice(beforePreset);assert.ok(presetCalls.some(c=>c.command==='manager'&&c.payload.method==='GET'&&c.payload.path==='/lives/commerce-preset'));assert.ok(presetCalls.some(c=>c.command==='manager'&&c.payload.method==='PUT'&&c.payload.path==='/lives/commerce-preset'));
+ assert.equal(presetCalls.some(c=>c.command==='start'||c.command==='manager'&&/orders|accounting/.test(c.payload.path)),false,'Prelive saves do not reserve a session or query orders/accounting');
+ await clickText('button','Abrir prévia');await delay(100);state={...state,prepared:true};win.webContents.send('studio:state',state);await delay(100);
  state={...state,studio:{session:{id,status:'reserved',managed_by_device:true}}};win.webContents.send('studio:state',state);await delay(150);
  await click('[aria-label="Nova cena"]');await delay(100);assert.equal(await js("document.querySelectorAll('.scene-list li').length"),2);
  await delay(600);assert.equal(last('layout.save').payload.scenes.length,2);assert.equal(last('layout.save').payload.scenes[1].layers.length,3,'A new scene starts as a copy of the current one');
@@ -95,7 +106,13 @@ app.whenReady().then(async()=>{let win;try{
   const layout=await js(`(()=>{const manager=document.querySelector('.manager-content'),boxes=[...manager.querySelectorAll('input[type=checkbox]')].map(e=>{const r=e.getBoundingClientRect();return{width:r.width,height:r.height}}),fields=[...manager.querySelectorAll('input:not([type=checkbox])')].map(e=>e.getBoundingClientRect().width),bar=document.querySelector('.controlbar').getBoundingClientRect(),production=document.querySelector('.production'),preview=document.querySelector('.preview').getBoundingClientRect();return{overflow:document.documentElement.scrollWidth>innerWidth,managerOverflow:manager.scrollWidth>manager.clientWidth+1,productionScrolls:production.scrollHeight>production.clientHeight+1,boxes,fields,footerVisible:bar.bottom<=innerHeight+1,preview:preview.toJSON(),ratio:preview.width/preview.height,docksVisible:document.querySelector('.docks').getBoundingClientRect().bottom<=bar.top+1}})()`);
   assert.equal(layout.overflow,false);assert.equal(layout.managerOverflow,false);assert.equal(layout.footerVisible,true);assert.equal(layout.productionScrolls,false,'Preview, docks and controls fit without scrolling at '+width+'x'+height);assert.equal(layout.docksVisible,true);assert.ok(Math.abs(layout.ratio-16/9)<.02,'Landscape preview keeps the 16:9 canvas ratio');assert.ok(layout.preview.height>=150);
   assert.ok(layout.boxes.length>=2);assert.ok(layout.boxes.every(b=>b.width>=14&&b.width<=18&&b.height>=14&&b.height<=18));assert.ok(layout.fields.every(w=>w>=150),'Manager fields must not compress into narrow columns');
-  layouts.push({width,height,zoom,...layout});await fs.writeFile(path.join(output,`studio-${width}-zoom-${zoom}.png`),(await win.webContents.capturePage()).toPNG());
+  await click('.layer-list li:first-child .layer-main');await delay(150);
+  const editor=await js("(()=>{const p=document.querySelector('.preview').getBoundingClientRect(),d=document.querySelector('.layer-dialog').getBoundingClientRect(),b=document.querySelector('.sheet-backdrop').getBoundingClientRect(),dock=document.querySelector('.docks').getBoundingClientRect();return {previewBottom:p.bottom,dialogTop:d.top,dialogBottom:d.bottom,dockTop:dock.top,dockBottom:dock.bottom,backdropTop:b.top}})()");
+  assert.ok(editor.dialogTop>=editor.previewBottom,'Editor never covers the preview at '+width+'x'+height+' zoom '+zoom);
+  assert.ok(editor.backdropTop>=editor.previewBottom,'Backdrop stays in the docks');assert.ok(editor.dialogBottom<=editor.dockBottom+1);assert.ok(last('bounds').payload.width>0,'Native preview remains visible while editing');
+  assert.ok(last('bounds').payload.viewport?.width>0,'Bounds include the CSS viewport for main-process DPI conversion');
+  layouts.push({width,height,zoom,...layout,editor});await fs.writeFile(path.join(output,`studio-${width}-zoom-${zoom}.png`),(await win.webContents.capturePage()).toPNG());
+  await click('[aria-label="Fechar ajustes"]');await delay(100);
  }
  win.setContentSize(1440,940);win.webContents.setZoomFactor(1);await delay(150);
  await setValue('[aria-label="Formato"]','portrait');await delay(150);
@@ -110,12 +127,22 @@ app.whenReady().then(async()=>{let win;try{
  await js("document.querySelector('.production').scrollTop=1000");await delay(250);assert.equal(last('bounds').payload.width,0,'Clipped preview must hide on scroll '+JSON.stringify(await js("(()=>{const p=document.querySelector('.production');return{scroll:p.scrollTop,scrollHeight:p.scrollHeight,height:p.clientHeight,preview:document.querySelector('.preview').getBoundingClientRect().toJSON()}})()")));
  await js("document.querySelector('.production').scrollTop=0");await delay(150);assert.ok(last('bounds').payload.width>0);
  win.setContentSize(1440,940);await delay(150);
+ // Remove every video source rapidly: the final request must be empty, and discovery cannot resurrect the camera.
+ saveLocks=1;
+ while(await js("document.querySelectorAll('.layer-list li').length")){await click('.layer-list li:last-child [aria-label="Remover fonte"]');await delay(20);}
+ await delay(1600);assert.deepEqual(last('prepare').payload.layers,[],'Last source removal reaches the engine as an empty scene');
+ assert.deepEqual(last('layout.save').payload.scenes.find(scene=>scene.id===last('layout.save').payload.activeScene).layers,[],'Last removal persists after a temporary save lock');
+ await click('[aria-label="Atualizar equipamentos"]');await delay(400);assert.equal(await js("document.querySelectorAll('.layer-list li').length"),0,'Explicit deletion survives rediscovery');
+ prepareLocks=1;const beforeRetry=calls.filter(c=>c.command==='prepare').length;
+ await click('[aria-label="Adicionar fonte"]');await delay(50);await clickText('.add-panel button','Texto');await delay(1600);
+ assert.equal(calls.filter(c=>c.command==='prepare').length,beforeRetry+2,'A temporary heartbeat lock retries once and applies the pending source');assert.equal(last('prepare').payload.layers[0].kind,'text');
+ await click('[aria-label="Fechar ajustes"]');await delay(50);
  state={...state,updateInfo:{available:true,latestVersion:'futura',status:'available',progress:0}};win.webContents.send('studio:state',state);await delay(100);assert.equal(await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Atualizar app').disabled"),true);
  state={...state,studio:{session:{id,status:'live',managed_by_device:false}}};win.webContents.send('studio:state',state);await delay(100);assert.equal(await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Atualizar app').disabled"),true,'A live from another device also blocks installation');
  state={...state,studio:{session:null},prepared:false};win.webContents.send('studio:state',state);await delay(100);await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Atualizar app').click()");await delay(50);assert.ok(calls.some(c=>c.command==='updates.install'));
  await js("(()=>{const slider=document.querySelector('[aria-label=\"Volume do microfone\"]');slider.disabled=false;Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(slider,'35');slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowLeft',bubbles:true}));slider.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowLeft',bubbles:true}));})()");await delay(150);
  assert.equal(calls.filter(c=>c.command==='volume').length,1,'Duplicate commit must not overlap audio IPC');
  assert.equal(await js("document.querySelector('[aria-label=\"Volume do microfone\"]').value"),'100','Rejected volume must restore authoritative value even without a changed snapshot');
- await fs.writeFile(path.join(output,'report.json'),JSON.stringify({passed:true,layouts,rememberedAccountConfirmation:true,scenesAndSources:true,automaticApply:true,layerToggleCommand:true,imagePicker:true,layoutPersistence:true,updateInstallAction:true,activeUpdateBlocked:true,modalHidesPreview:true,scrollHidesPreview:true,network:false,physicalCapture:false},null,2));
+ await fs.writeFile(path.join(output,'report.json'),JSON.stringify({passed:true,layouts,rememberedAccountConfirmation:true,scenesAndSources:true,automaticApply:true,serializedVisibility:true,emptySceneRemoval:true,noCameraResurrection:true,transientRetry:true,imagePicker:true,layoutPersistence:true,updateInstallAction:true,activeUpdateBlocked:true,modalHidesPreview:true,scrollHidesPreview:true,network:false,physicalCapture:false},null,2));
  console.log(JSON.stringify({passed:true,layouts:layouts.map(x=>[x.width,x.height,x.zoom,Math.round(x.preview.width)+'x'+Math.round(x.preview.height)]),checkboxesNormal:true,managerInputsReadable:true,previewModalAndScroll:true,accountConfirmation:true,updateAction:true,scenes:true}));win.destroy();app.exit(0);
 }catch(error){console.error(error.stack);win?.destroy();app.exit(1)}});

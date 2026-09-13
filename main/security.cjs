@@ -3,6 +3,7 @@ const ORIGIN = 'https://privex.site';
 const UUID = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 const uuid = new RegExp(`^${UUID}$`, 'i');
 function managerRoute(method, input, sessionId) {
+  if(input==='/lives/commerce-preset'&&['GET','PUT'].includes(method))return '/obs/v1/manager/commerce-preset';
   if (!uuid.test(sessionId || '') || typeof input !== 'string' || input.length > 500) throw new Error('Sessão indisponível.');
   const url = new URL(input, ORIGIN);
   if (url.origin !== ORIGIN || url.pathname.includes('%') || input.includes('..') || input.includes('\\') || url.hash || url.username || url.password) throw new Error('Endereço não permitido.');
@@ -57,7 +58,7 @@ function layerInput(value, allowedFiles) {
   return layer;
 }
 function layersInput(value, allowedFiles) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 6) throw new Error('A cena precisa de 1 a 6 fontes.');
+  if (!Array.isArray(value) || value.length > 6) throw new Error('A cena aceita até 6 fontes.');
   return value.map(layer => layerInput(layer, allowedFiles));
 }
 function prepareInput(value, allowedFiles = new Set()) {
@@ -70,7 +71,7 @@ function prepareInput(value, allowedFiles = new Set()) {
   if (Array.isArray(value.layers)) {
     result.layers = layersInput(value.layers, allowedFiles);
     const primary = result.layers.find(layer => CAPTURE_KINDS.includes(layer.kind));
-    result.sourceType = primary ? primary.kind : result.layers[0].kind;
+    result.sourceType = primary ? primary.kind : result.layers[0]?.kind || 'empty';
   } else {
     if (!CAPTURE_KINDS.includes(value.sourceType)) throw new Error('Escolha uma fonte.');
     result.sourceType = value.sourceType;
@@ -82,4 +83,14 @@ function audioInput(value) {
   if (!value || !['microphone','desktop'].includes(value.channel) || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 100) throw new Error('Volume inválido.');
   return {channel:value.channel,volume:value.volume};
 }
-module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, layerInput, layersInput, imageFileAllowed, IMAGE_EXTENSIONS, LAYER_KINDS, CAPTURE_KINDS, uuid };
+function previewInput(value, contentSize, zoom) {
+  if(!value||typeof value!=='object')throw new Error('Área inválida.');
+  for(const key of ['x','y','width','height'])if(!Number.isFinite(value[key])||value[key]<0||value[key]>10000)throw new Error('Área inválida.');
+  if(!value.width||!value.height)return {x:0,y:0,width:0,height:0};
+  if(!Number.isFinite(zoom)||zoom<=0)throw new Error('Escala inválida.');
+  const viewport=value.viewport||{width:contentSize[0]/zoom,height:contentSize[1]/zoom};
+  for(const [key,index]of [['width',0],['height',1]])if(!Number.isFinite(viewport[key])||viewport[key]<1||Math.abs(viewport[key]*zoom-contentSize[index])>3)throw new Error('Área da prévia mudou.');
+  if(value.x+value.width>viewport.width+.5||value.y+value.height>viewport.height+.5)throw new Error('Área fora da janela.');
+  return {x:value.x,y:value.y,width:value.width,height:value.height,viewport:{width:viewport.width,height:viewport.height}};
+}
+module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, layerInput, layersInput, imageFileAllowed, IMAGE_EXTENSIONS, LAYER_KINDS, CAPTURE_KINDS, uuid, previewInput };

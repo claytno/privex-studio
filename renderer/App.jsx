@@ -6,6 +6,8 @@ import LiveCommerceStudio from "../shared/pages/live/LiveCommerceStudio.jsx";
 import {invoke} from "./bridge.js";import {setUser} from "./auth.js";import {setSession} from "./adapter.js";
 import "./style.css";
 import useLivePolling from "../shared/hooks/useLivePolling.js";
+import {createSceneSync,shouldSuggestInitialCamera} from './scene-sync.mjs';
+import useLayoutSave from './useLayoutSave.js';
 const money=value=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format((value||0)/100);
 const CAPTURE=['camera','window','display','game'];
 const KIND_LABELS={camera:'Câmera',window:'Janela',display:'Tela inteira',game:'Jogo',image:'Imagem',text:'Texto'};
@@ -48,7 +50,9 @@ function previewBounds(element){
     if(/auto|scroll|hidden|clip/.test(style.overflowY)&& (rect.top<clip.top-.5||rect.bottom>clip.bottom+.5))return hiddenBounds;
     if(/auto|scroll|hidden|clip/.test(style.overflowX)&& (rect.left<clip.left-.5||rect.right>clip.right+.5))return hiddenBounds;
   }
-  return{x:rect.x,y:rect.y,width:rect.width,height:rect.height};
+  const style=getComputedStyle(element),number=value=>Number.parseFloat(value)||0;
+  const left=number(style.borderLeftWidth)+number(style.paddingLeft),right=number(style.borderRightWidth)+number(style.paddingRight),top=number(style.borderTopWidth)+number(style.paddingTop),bottom=number(style.borderBottomWidth)+number(style.paddingBottom);
+  return{x:rect.x+left,y:rect.y+top,width:Math.max(0,rect.width-left-right),height:Math.max(0,rect.height-top-bottom),viewport:{width:innerWidth,height:innerHeight}};
 }
 function UpdateBanner({info,blocked,run}){
   if(!info?.available&&info?.status!=='error')return null;
@@ -60,9 +64,13 @@ function UpdatePreferences({state,busy,run}){
 }
 function App(){
   const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false);
-  const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[applying,setApplying]=useState(false);
-  const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),applied=useRef(''),failed=useRef(''),autoOpened=useRef(false),suggestedScenes=useRef(new Set()),rate=useRef({bytes:0,at:0,kbps:0});
-  const session=state.studio?.session;const owned=session?.managed_by_device;const displayStatus=session?.status==='live'&&!session.media_ready?'starting':session?.status;const busy=localBusy||state.busy;const sessionActive=!!session&&['waiting','reserved','starting','live','reconnecting','ending'].includes(session.status);const active=owned&&sessionActive;const displayPortrait=state.prepared?(state.canvasPortrait??portrait):portrait;
+  const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[syncState,setSyncState]=useState({applying:false,appliedKey:'',failedKey:'',error:'',retrying:false});
+  const [sourceNotice,setSourceNotice]=useState('');
+  const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),initialScene=useRef(''),autoOpened=useRef(false),suggestedScenes=useRef(new Set()),editScope=useRef({}),accountScope=useRef(null),rate=useRef({bytes:0,at:0,kbps:0});
+  const synchronizer=useMemo(()=>createSceneSync({prepare:payload=>invoke('prepare',payload),onState:setSyncState}),[]);
+  useEffect(()=>()=>synchronizer.dispose(),[synchronizer]);
+  const applying=syncState.applying;
+  const session=state.studio?.session;const owned=session?.managed_by_device;const displayStatus=session?.status==='live'&&!session.media_ready?'starting':session?.status;const busy=localBusy||state.busy||applying;const sessionActive=!!session&&['waiting','reserved','starting','live','reconnecting','ending'].includes(session.status);const active=owned&&sessionActive;const displayPortrait=state.prepared?(state.canvasPortrait??portrait):portrait;
   const update=value=>{audioState.current={microphone:value.microphoneVolume??100,desktop:value.desktopVolume??100};setUser(value.user);setSession(value.studio?.session?.managed_by_device?value.studio.session.id:null);setMuted(!!value.muted);setState(value);};
   useEffect(()=>{invoke('snapshot').then(update);const cleanup=window.privex.onState(update);const timer=setInterval(()=>invoke('snapshot').then(update).catch(()=>{}),5000);return()=>{cleanup();clearInterval(timer);};},[]);
   useLayoutEffect(()=>{
@@ -78,57 +86,51 @@ function App(){
   async function run(name,data){setError('');setLocalBusy(true);try{return await invoke(name,data);}catch(e){setError(e.message);}finally{setLocalBusy(false);}}
   // Saved scenes arrive with the first snapshot; a missing layout (older host) behaves like a fresh installation.
   useEffect(()=>{
-    if(layoutLoaded.current||!state.user)return;const layout=state.layout||DEFAULT_LAYOUT;layoutLoaded.current=true;layoutFresh.current=layout.fresh===true||!state.layout;
+    if(accountScope.current!==state.user?.id){accountScope.current=state.user?.id;layoutLoaded.current=false;autoOpened.current=false;initialDevices.current={camera:false,microphone:false};suggestedScenes.current=new Set();setScenes([]);setActiveScene('');setMic('');setDesktop('');setPortrait(false);setSelected(null);setAdding(false);setRenaming(null);setDevices(null);setError('');setSourceNotice('');}
+    if(layoutLoaded.current||!state.user)return;const layout=state.layout||DEFAULT_LAYOUT;layoutLoaded.current=true;layoutFresh.current=layout.fresh===true||!state.layout;initialScene.current=layout.activeScene;
     setScenes(layout.scenes.map(scene=>({...scene,layers:scene.layers.map(withUid)})));setActiveScene(layout.activeScene);setMic(layout.microphoneId||'');setDesktop(layout.desktopId||'');setPortrait(!!layout.portrait);
     if(layout.microphoneId)initialDevices.current.microphone=true;
   },[state.user?.id,state.layout]);
   const scene=scenes.find(item=>item.id===activeScene)||scenes[0];const layers=scene?.layers||[];
+  editScope.current={userId:state.user?.id,sceneId:scene?.id,selected};
   const patchScene=(id,change)=>setScenes(current=>current.map(item=>item.id===id?{...item,...change(item)}:item));
   const setLayers=updater=>{if(scene)patchScene(scene.id,item=>({layers:updater(item.layers)}));};
   const patchLayer=(layerUid,change)=>setLayers(list=>list.map(layer=>layer.uid===layerUid?{...layer,...change}:layer));
   async function enumerate(){
     if(deviceScan.current)return;deviceScan.current=true;
-    try{const data=await invoke('enumerate');setDevices(data);setDeviceError('');const firstMic=data.microphones?.find(item=>item.id==='default')?.id??data.microphones?.[0]?.id;if(!initialDevices.current.microphone&&firstMic!=null){initialDevices.current.microphone=true;setMic(String(firstMic));}}
+    const userId=state.user?.id;
+    try{const data=await invoke('enumerate');if(editScope.current.userId!==userId)return;setDevices(data);setDeviceError('');const firstMic=data.microphones?.find(item=>item.id==='default')?.id??data.microphones?.[0]?.id;if(layoutFresh.current&&!initialDevices.current.microphone&&firstMic!=null){initialDevices.current.microphone=true;setMic(String(firstMic));}}
     catch(e){setDeviceError(e.message);}finally{deviceScan.current=false;}
   }
   useEffect(()=>{if(!state.user)return;void enumerate();const timer=setInterval(()=>{if(!document.hidden)void enumerate();},15000);const refresh=()=>void enumerate();window.addEventListener('focus',refresh);return()=>{clearInterval(timer);window.removeEventListener('focus',refresh);};},[state.user?.id]);
   // First run: suggest the first camera as the only source. The capture only starts when the user opens the preview.
   useEffect(()=>{
-    if(!devices||!scene||scene.layers.length||suggestedScenes.current.has(scene.id))return;const firstCamera=devices.cameras?.[0];if(firstCamera==null)return;
+    const firstCamera=devices?.cameras?.[0];
+    if(!shouldSuggestInitialCamera({fresh:layoutFresh.current,initialSceneId:initialScene.current,scene,alreadySuggested:suggestedScenes.current.has(scene?.id),camera:firstCamera}))return;
     suggestedScenes.current.add(scene.id);initialDevices.current.camera=true;setLayers(()=>[withUid({kind:'camera',id:String(firstCamera.id),fit:'fit',corner:'br',size:.3,visible:true,name:''})]);
   },[devices,scene?.id]);
   useEffect(()=>{setMicLevel(state.microphoneVolume??100);setDesktopLevel(state.desktopVolume??100);},[state.microphoneVolume,state.desktopVolume]);
   const listFor=kind=>kind==='camera'?devices?.cameras:kind==='window'?devices?.windows:kind==='display'?devices?.displays:kind==='game'?devices?.games:null;
   const available=(items,id)=>!id||(items||[]).some(item=>String(item.id??item.value)===id);
   const deviceName=(kind,id)=>{const item=(listFor(kind)||[]).find(entry=>String(entry.id??entry.value)===id);return item?item.name??item.label:'';};
-  const layerMissing=layer=>CAPTURE.includes(layer.kind)&&!!devices&&!available(listFor(layer.kind),layer.id);
+  const layerMissing=layer=>CAPTURE.includes(layer.kind)&&(!layer.id||!!devices&&!available(listFor(layer.kind),layer.id));
   const layerLabel=layer=>layer.name||(CAPTURE.includes(layer.kind)?deviceName(layer.kind,layer.id):layer.kind==='image'?layer.fileName:layer.text)||KIND_LABELS[layer.kind];
   const missingMic=!!devices&&!available(devices.microphones,mic),missingDesktop=!!devices&&!available(devices.desktops,desktop);
   const missingLayers=layers.filter(layerMissing);
   const composition=useMemo(()=>JSON.stringify({layers:layers.map(toEngine),mic,desktop,portrait}),[layers,mic,desktop,portrait]);
-  const canApply=layers.length>0&&!missingLayers.length&&!missingMic&&!missingDesktop;
-  async function apply(){
-    const snapshot=composition;setApplying(true);
-    try{const result=await run('prepare',{layers:layers.map(toEngine),microphoneId:mic,desktopId:desktop,portrait});if(result===undefined)failed.current=snapshot;else{applied.current=snapshot;failed.current='';}return result;}
-    finally{setApplying(false);}
-  }
-  // Once the preview is open, every scene/source/audio change is applied automatically; the engine keeps the previous capture when a change fails.
-  useEffect(()=>{
-    if(!state.prepared||!canApply||busy||applying||composition===applied.current||composition===failed.current)return;
-    const timer=setTimeout(()=>{void apply();},350);return()=>clearTimeout(timer);
-  },[composition,state.prepared,canApply,busy,applying]);
-  useEffect(()=>{if(!state.prepared)applied.current='';},[state.prepared]);
+  const canApply=!!state.user&&accountScope.current===state.user.id&&layoutLoaded.current&&!!scene&&!missingLayers.length&&(!layers.length||!missingMic&&!missingDesktop);
+  useLayoutEffect(()=>{
+    synchronizer.update({scope:state.user?.id,key:composition,payload:{layers:layers.map(toEngine),microphoneId:mic,desktopId:desktop,portrait},valid:canApply,enabled:!!state.prepared,blocked:!!(localBusy||state.busy)});
+  },[composition,canApply,state.user?.id,state.prepared,localBusy,state.busy,synchronizer]);
+  const apply=()=>{setError('');synchronizer.request();};
   // Once a person has used the preview on this computer it opens by itself on the next launches, before any live.
   useEffect(()=>{
     if(autoOpened.current||state.prepared||!layoutLoaded.current||layoutFresh.current||!devices||!canApply||busy||applying||state.transmitting||sessionActive)return;
     autoOpened.current=true;void apply();
   },[devices,canApply,busy,applying,state.prepared,state.transmitting,sessionActive]);
-  async function closePreview(){autoOpened.current=true;await run('preview.close');}
-  useEffect(()=>{
-    if(!layoutLoaded.current||!scenes.length)return;
-    const timer=setTimeout(()=>{void invoke('layout.save',{scenes:scenes.map(item=>({id:item.id,name:item.name,layers:item.layers.map(persistLayer)})),activeScene:scene?.id||scenes[0].id,microphoneId:mic,desktopId:desktop,portrait}).catch(()=>{});},600);
-    return()=>clearTimeout(timer);
-  },[scenes,activeScene,mic,desktop,portrait]);
+  async function closePreview(){autoOpened.current=true;synchronizer.suspend();await run('preview.close');}
+  const layoutPayload=state.user&&accountScope.current===state.user.id&&layoutLoaded.current&&scenes.length?{scenes:scenes.map(item=>({id:item.id,name:item.name,layers:item.layers.map(persistLayer)})),activeScene:scene?.id||scenes[0].id,microphoneId:mic,desktopId:desktop,portrait}:null;
+  const layoutSave=useLayoutSave(layoutPayload,state.user?.id);
   useEffect(()=>{
     const bytes=state.mediaStatus?.totalBytes;if(!state.transmitting||typeof bytes!=='number'){rate.current={bytes:0,at:0,kbps:0};return;}
     const now=Date.now();if(rate.current.at&&now>rate.current.at){rate.current.kbps=Math.max(0,Math.round((bytes-rate.current.bytes)*8/(now-rate.current.at)));}
@@ -142,27 +144,35 @@ function App(){
   }
   const options=(items)=>(items||[]).map(item=><option key={item.id??item.value} value={item.id??item.value}>{item.name??item.label}</option>);
   async function addLayer(kind){
+    const scope={...editScope.current};
+    suggestedScenes.current.add(scope.sceneId);
     setAdding(false);if(layers.length>=6){setError('A cena aceita até 6 fontes.');return;}
     const overlayDefault=layers.length>0&&(kind==='camera'||kind==='image'||kind==='text');
     let layer={kind,fit:overlayDefault?'corner':'fit',corner:kind==='text'?'bl':kind==='image'?'tr':'br',size:kind==='text'?.4:.3,visible:true,name:''};
     if(CAPTURE.includes(kind)){const first=listFor(kind)?.[0];layer.id=first!=null?String(first.id):'';}
     else if(kind==='image'){const picked=await run('image.pick');if(!picked)return;layer.file=picked.file;}
     else layer.text='Sua mensagem';
-    const created=withUid(layer);setLayers(list=>[created,...list]);setSelected(created.uid);if(kind==='camera')initialDevices.current.camera=true;
+    if(editScope.current.userId!==scope.userId||editScope.current.sceneId!==scope.sceneId)return;
+    const created=withUid(layer);patchScene(scope.sceneId,item=>({layers:item.layers.length<6?[created,...item.layers]:item.layers}));setSelected(created.uid);if(kind==='camera')initialDevices.current.camera=true;
   }
-  async function toggleLayer(layer){
-    const index=layers.findIndex(item=>item.uid===layer.uid),visible=layer.visible===false;
-    const next=layers.map(item=>item.uid===layer.uid?{...item,visible}:item);
-    if(state.prepared&&applied.current===composition&&!busy){const result=await run('layer',{index,visible});if(result!==undefined)applied.current=JSON.stringify({layers:next.map(toEngine),mic,desktop,portrait});}
-    patchLayer(layer.uid,{visible});
+  async function replaceImage(layer){
+    const scope={...editScope.current},picked=await run('image.pick');
+    if(!picked||editScope.current.userId!==scope.userId||editScope.current.sceneId!==scope.sceneId||editScope.current.selected!==scope.selected)return;
+    patchScene(scope.sceneId,item=>({layers:item.layers.map(current=>current.uid===layer.uid?{...current,file:picked.file,fileName:picked.name}:current)}));
   }
+  const toggleLayer=layer=>setLayers(list=>list.map(item=>item.uid===layer.uid?{...item,visible:item.visible===false}:item));
   const moveLayer=(layer,delta)=>setLayers(list=>{const index=list.findIndex(item=>item.uid===layer.uid),target=index+delta;if(target<0||target>=list.length)return list;const copy=[...list];[copy[index],copy[target]]=[copy[target],copy[index]];return copy;});
-  const removeLayer=layer=>{setLayers(list=>list.filter(item=>item.uid!==layer.uid));if(selected===layer.uid)setSelected(null);};
-  const addScene=()=>{const id='cena-'+Date.now().toString(36);setScenes(list=>[...list,{id,name:'Cena '+(list.length+1),layers:layers.map(layer=>withUid(persistLayer(layer)))}]);setActiveScene(id);setSelected(null);};
-  const removeScene=item=>{if(scenes.length<2)return;setScenes(list=>list.filter(entry=>entry.id!==item.id));if(activeScene===item.id)setActiveScene(scenes.find(entry=>entry.id!==item.id).id);};
+  const removeLayer=layer=>{
+    suggestedScenes.current.add(scene?.id);
+    if(layers.length===1&&(missingMic||missingDesktop)&&syncState.appliedPayload){setMic(syncState.appliedPayload.microphoneId);setDesktop(syncState.appliedPayload.desktopId);setSourceNotice('Removendo a última fonte. A seleção de áudio anterior foi mantida para aplicar o quadro preto; confira os medidores.');}
+    else setSourceNotice('');
+    setLayers(list=>list.filter(item=>item.uid!==layer.uid));if(selected===layer.uid)setSelected(null);
+  };
+  const addScene=()=>{const id='cena-'+uid();suggestedScenes.current.add(id);setScenes(list=>[...list,{id,name:'Cena '+(list.length+1),layers:layers.map(layer=>withUid(persistLayer(layer)))}]);setActiveScene(id);setSelected(null);setAdding(false);setRenaming(null);};
+  const removeScene=item=>{if(scenes.length<2)return;setScenes(list=>list.filter(entry=>entry.id!==item.id));if(activeScene===item.id){setActiveScene(scenes.find(entry=>entry.id!==item.id).id);setSelected(null);setAdding(false);setRenaming(null);}};
   const selectedLayer=layers.find(layer=>layer.uid===selected)||null;
   const layerReady=index=>state.prepared&&state.mediaStatus?.layers?.[index]?.ready;
-  const inSync=applied.current===composition;
+  const inSync=syncState.appliedKey===composition;
   if(!state.user)return <main className="welcome">
     <header className="brand"><span className="brand-mark">p<span>×</span></span> Privex <b>Studio</b><small>BETA</small></header>
     <UpdateBanner info={state.updateInfo} blocked={!!(busy||state.transmitting||sessionActive)} run={run}/>
@@ -173,7 +183,7 @@ function App(){
       <UpdatePreferences state={state} busy={busy} run={run}/>
     </section></div><footer>Privex Studio {state.version} · Windows · Beta <button className="text-button" disabled={busy} onClick={()=>run('updates.check')}>Verificar atualização</button>{state.notice&&<p role="status">{state.notice}</p>}</footer>
   </main>;
-  const previewMessage=!state.prepared?(layers.length?'Clique em Abrir prévia para ligar a captura. A prévia aparece aqui antes de você entrar ao vivo.':'Adicione uma câmera, janela, tela, imagem ou texto em Fontes.'):'';
+  const previewMessage=!state.prepared?(layers.length?'Clique em Abrir prévia para ligar a captura. A prévia aparece aqui antes de você entrar ao vivo.':'Adicione fontes ou abra a prévia com um quadro preto. O áudio usa os dispositivos selecionados.'):'';
   return <main className="studio"><header className="topbar"><div className="brand"><span className="brand-mark">p<span>×</span></span> Privex <b>Studio</b><small>BETA</small></div><span className={`signal ${displayStatus==='live'?'is-live':''}`}><i/>{statusNames[displayStatus]||'Fora do ar'}</span><div className="account"><button className="text-button" disabled={busy||sessionActive||state.transmitting} onClick={()=>run('updates.check')}>Atualizações</button><span>@{state.user.username}</span><button title="Sair da conta" aria-label="Sair da conta" disabled={busy||active} onClick={()=>run('logout')}><LogOut size={18}/></button></div></header>
     <UpdateBanner info={state.updateInfo} blocked={!!(sessionActive||state.transmitting||busy)} run={run}/>
     <div className="workspace"><section className="production">
@@ -181,19 +191,20 @@ function App(){
         <div className="preview-caption"><span>{state.transmitting?'AO VIVO · este é exatamente o vídeo enviado':state.prepared?'PRÉVIA LOCAL · ninguém está assistindo ainda':'PRÉVIA DESLIGADA · nenhuma captura ativa'}</span><span className="format-badge">{displayPortrait?'9:16 vertical':'16:9 horizontal'}</span></div></div>
       <div className="toolbar">
         {state.prepared&&!sessionActive&&<button className="secondary" disabled={busy} onClick={closePreview}><Square size={14}/> Fechar prévia</button>}
-        {state.prepared?<span className={'apply-state'+(applying?' is-working':'')} role="status">{applying?'Aplicando…':!layers.length?'Adicione uma fonte':inSync?'Cena aplicada':missingLayers.length||missingMic||missingDesktop?'Equipamento desconectado':'Aplicando alterações…'}</span>:<button className="primary" disabled={busy||!canApply} onClick={apply}><Play size={16}/> Abrir prévia</button>}
+        {state.prepared?<span className={'apply-state'+(applying?' is-working':'')} role="status">{applying?'Aplicando…':syncState.retrying?'Aguardando o motor de vídeo…':syncState.failedKey===composition?'Cena não aplicada':inSync?(layers.length?'Cena aplicada':'Quadro preto aplicado'):missingLayers.length||missingMic||missingDesktop?'Equipamento desconectado':'Aplicando alterações…'}</span>:<button className="primary" disabled={busy||!canApply} onClick={apply}><Play size={16}/> Abrir prévia</button>}
         <label className="inline-field">Formato<select aria-label="Formato" disabled={busy||state.transmitting} value={portrait?'portrait':'landscape'} onChange={e=>setPortrait(e.target.value==='portrait')}><option value="landscape">16:9 horizontal</option><option value="portrait">9:16 vertical</option></select></label>
         <button className={state.sceneMode==='pause'?'muted-button':'secondary'} disabled={!state.prepared||busy} onClick={()=>run('scene',{mode:state.sceneMode==='pause'?'live':'pause'})}>{state.sceneMode==='pause'?<><Play size={15}/> Voltar da pausa</>:<><Pause size={15}/> Pausa</>}</button>
         <button className={muted?'muted-button':'secondary'} disabled={!state.prepared||busy} onClick={async()=>{const result=await run('mute',{muted:!muted});if(result!==undefined)setMuted(!muted);}}>{muted?<VolumeX size={15}/>:<Mic size={15}/>} {muted?'Mic silenciado':'Silenciar mic'}</button>
         <label className="fine check"><input type="checkbox" checked={!!state.overlayEnabled} disabled={!owned||busy} onChange={e=>run('overlay',{enabled:e.target.checked})}/> Meta no vídeo</label>
       </div>
-      {(error||state.error)&&<p role="alert" className="error">{error||state.error}</p>}{state.notice&&!error&&<p role="status" className="notice">{state.notice}</p>}
+      {(error||syncState.error||state.error)&&<p role="alert" className="error">{error||syncState.error||state.error}</p>}{syncState.failedKey===composition&&<button className="secondary" disabled={busy||!canApply} onClick={apply}><RefreshCw size={14}/> Tentar aplicar cena novamente</button>}{state.notice&&!error&&!syncState.error&&<p role="status" className="notice">{state.notice}</p>}
+      {sourceNotice&&<p role="status" className="notice">{sourceNotice}</p>}
       {deviceError&&<p className="warning" role="status">Não foi possível atualizar os equipamentos: {deviceError}</p>}{(missingLayers.length>0||missingMic||missingDesktop)&&<p className="warning" role="status">Um equipamento selecionado foi desconectado. Reconecte ou escolha outro. A captura não troca para outro dispositivo automaticamente.</p>}
       {session&&!owned&&<p className="warning">Há uma live em outro dispositivo. Gerencie pelo site antes de iniciar aqui.</p>}
       <div className="docks">
         <section className="dock dock-scenes" aria-label="Cenas"><header><h3><Film size={14}/> Cenas</h3><button className="icon-button" aria-label="Nova cena" title="Nova cena (copia as fontes atuais)" disabled={scenes.length>=12} onClick={addScene}><Plus size={15}/></button></header>
           <ul className="scene-list">{scenes.map(item=><li key={item.id} className={item.id===scene?.id?'is-active':''}>{renaming===item.id?<input autoFocus aria-label="Nome da cena" maxLength={40} defaultValue={item.name} onBlur={e=>{patchScene(item.id,()=>({name:e.target.value.trim()||item.name}));setRenaming(null);}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();if(e.key==='Escape'){e.currentTarget.value=item.name;e.currentTarget.blur();}}}/>:<button className="scene-button" onClick={()=>{setActiveScene(item.id);setSelected(null);}} onDoubleClick={()=>setRenaming(item.id)}>{item.name}</button>}{item.id===scene?.id&&renaming!==item.id&&<><button className="icon-button" aria-label="Renomear cena" onClick={()=>setRenaming(item.id)}><Pencil size={13}/></button><button className="icon-button" aria-label="Remover cena" disabled={scenes.length<2} onClick={()=>removeScene(item)}><Trash2 size={13}/></button></>}</li>)}</ul>
-          <p className="dock-hint">Clique para trocar, inclusive ao vivo. A pausa cobre qualquer cena.</p>
+          <p className="dock-hint">Clique para trocar, inclusive ao vivo. A pausa cobre qualquer cena.</p>{layoutSave.error?<div className="dock-hint" role="alert">Não foi possível salvar as cenas: {layoutSave.error}<button className="text-button" onClick={layoutSave.retry}>Tentar salvar novamente</button></div>:layoutSave.pending&&<p role="status" className="dock-hint">Salvando alterações…</p>}
         </section>
         <section className="dock dock-sources" aria-label="Fontes"><header><h3><Layers size={14}/> Fontes</h3><div className="dock-actions"><button className="icon-button" aria-label={devices?'Atualizar equipamentos':'Buscar equipamentos'} title={devices?'Atualizar lista de equipamentos':'Buscar equipamentos'} disabled={busy} onClick={enumerate}><RefreshCw size={14}/></button><button className="icon-button" aria-label="Adicionar fonte" aria-expanded={adding} disabled={busy||layers.length>=6} onClick={()=>setAdding(value=>!value)}><Plus size={15}/></button></div></header>
           {adding&&<div className="add-panel">{['camera','window','display','game','image','text'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" onClick={()=>addLayer(kind)}><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>}
@@ -216,13 +227,12 @@ function App(){
           </div>
           {desktop&&<p className="dock-hint">O áudio do computador inclui outros apps e notificações. Use fones e silencie o player da sua própria live para evitar eco.</p>}
         </section>
-      </div>
       {selectedLayer&&(()=>{const Icon=KIND_ICONS[selectedLayer.kind];return <><div className="sheet-backdrop" onClick={()=>setSelected(null)}/><div className="layer-dialog" role="dialog" aria-modal="true" aria-label="Ajustes da fonte" onKeyDown={e=>{if(e.key==='Escape')setSelected(null);}}>
         <header><h3><Icon size={15}/> {layerLabel(selectedLayer)}</h3><span className="dock-hint">{KIND_LABELS[selectedLayer.kind]} · as mudanças valem na hora</span><button className="icon-button" aria-label="Fechar ajustes" onClick={()=>setSelected(null)}><X size={16}/></button></header>
         <div className="layer-props">
             {CAPTURE.includes(selectedLayer.kind)&&<label>{KIND_LABELS[selectedLayer.kind]}<select aria-label={'Equipamento da fonte'} disabled={!devices} value={selectedLayer.id||''} onChange={e=>patchLayer(selectedLayer.uid,{id:e.target.value})}><option value="">Escolha um equipamento</option>{layerMissing(selectedLayer)&&<option value={selectedLayer.id}>Equipamento desconectado</option>}{options(listFor(selectedLayer.kind))}</select>{devices&&!(listFor(selectedLayer.kind)||[]).length&&<span className="fine">{selectedLayer.kind==='camera'?'Nenhuma câmera encontrada. Conecte a câmera, feche outros programas que a usam e clique em Atualizar equipamentos.':'Nada encontrado. Clique em Atualizar equipamentos.'}</span>}</label>}
             {selectedLayer.kind==='text'&&<label>Texto<input maxLength={120} value={selectedLayer.text||''} onChange={e=>patchLayer(selectedLayer.uid,{text:e.target.value})}/></label>}
-            {selectedLayer.kind==='image'&&<div className="image-row"><span title={selectedLayer.file}>{selectedLayer.fileName}</span><button className="text-button" disabled={busy} onClick={async()=>{const picked=await run('image.pick');if(picked)patchLayer(selectedLayer.uid,{file:picked.file,fileName:picked.name});}}>Trocar imagem</button></div>}
+            {selectedLayer.kind==='image'&&<div className="image-row"><span title={selectedLayer.file}>{selectedLayer.fileName}</span><button className="text-button" disabled={busy} onClick={()=>replaceImage(selectedLayer)}>Trocar imagem</button></div>}
             <label>Nome<input maxLength={40} placeholder={layerLabel(selectedLayer)} value={selectedLayer.name||''} onChange={e=>patchLayer(selectedLayer.uid,{name:e.target.value})}/></label>
             <label>Posição<select aria-label="Posição da fonte" value={selectedLayer.fit||'fit'} onChange={e=>patchLayer(selectedLayer.uid,{fit:e.target.value})}><option value="fit">Tela inteira, imagem completa</option><option value="fill">Preencher, cortando as bordas</option><option value="corner">Em um canto (sobre as outras)</option></select></label>
             {selectedLayer.fit==='corner'&&<div className="corner-row"><div className="corner-grid" role="group" aria-label="Canto">{[['tl','Canto superior esquerdo'],['tr','Canto superior direito'],['bl','Canto inferior esquerdo'],['br','Canto inferior direito']].map(([corner,label])=><button key={corner} aria-label={label} aria-pressed={selectedLayer.corner===corner} className={selectedLayer.corner===corner?'is-active':''} onClick={()=>patchLayer(selectedLayer.uid,{corner})}/>)}</div><label className="size-field">Tamanho <strong>{Math.round((selectedLayer.size||.3)*100)}%</strong><input aria-label="Tamanho da fonte no canto" type="range" min="15" max="60" step="5" value={Math.round((selectedLayer.size||.3)*100)} onChange={e=>patchLayer(selectedLayer.uid,{size:Number(e.target.value)/100})}/></label></div>}
@@ -232,10 +242,11 @@ function App(){
         </div>
         <footer><button className="secondary" onClick={()=>{removeLayer(selectedLayer);}}><Trash2 size={14}/> Remover fonte</button><button className="primary" autoFocus onClick={()=>setSelected(null)}><Check size={15}/> Concluir</button></footer>
       </div></>;})()}
-    </section><aside className="manager"><div className="manager-heading"><h2>Seu gerenciador</h2><p>Conectado à mesma live do site</p></div><div className="tabbar" role="tablist" aria-label="Gerenciador"><button role="tab" aria-selected={tab==='chat'} onClick={()=>setTab('chat')}><MessageSquare size={17}/> Chat</button><button role="tab" aria-selected={tab==='commerce'} onClick={()=>setTab('commerce')}><Gift size={17}/> Interações</button></div><div className="manager-content" role="tabpanel">{owned?<React.Fragment key={session.id}>{tab==='chat'?<LiveChatPanel sessionId={session.id}/>:<><Revenue sessionId={session.id}/><LiveCommerceStudio sessionId={session.id}/></>}</React.Fragment>:<div className="manager-empty"><MessageSquare size={30}/><h3>Todo mundo por perto</h3><p>Ao abrir uma sessão, seu chat, metas, roleta e presentes estarão aqui.</p><p className="fine">As interações usam as mesmas regras e registros do site.</p></div>}</div><UpdatePreferences state={state} busy={busy} run={run}/></aside></div>
+      </div>
+    </section><aside className="manager"><div className="manager-heading"><h2>Seu gerenciador</h2><p>{active?'Conectado à mesma live do site':'Configure antes da live; aplicado à próxima transmissão'}</p></div><div className="tabbar" role="tablist" aria-label="Gerenciador"><button role="tab" aria-selected={tab==='chat'} onClick={()=>setTab('chat')}><MessageSquare size={17}/> Chat</button><button role="tab" aria-selected={tab==='commerce'} onClick={()=>setTab('commerce')}><Gift size={17}/> Interações</button></div><div className="manager-content" role="tabpanel">{tab==='commerce'?<React.Fragment key={active?session.id:'preset-'+state.user.id}>{active&&<Revenue sessionId={session.id}/>}<LiveCommerceStudio sessionId={active?session.id:null}/></React.Fragment>:active?<LiveChatPanel key={session.id} sessionId={session.id}/>:<div className="manager-empty"><MessageSquare size={30}/><h3>Todo mundo por perto</h3><p>Ao abrir uma sessão, seu chat estará aqui. Prepare metas, roleta e presentes em Interações antes de começar.</p><p className="fine">As interações usam as mesmas regras e registros do site.</p></div>}</div><UpdatePreferences state={state} busy={busy} run={run}/></aside></div>
     <footer className="controlbar"><div className="control-status"><span className="signal"><i/>{statusNames[displayStatus]||'Pronta para preparar'}</span><p>{session?.status==='waiting'?`Posição na fila: ${session.queue_position||'consultando'}`:state.transmitting?`${rate.current.kbps} kbps · ${state.mediaStatus?.droppedFrames||0} quadros perdidos`:'Privex Studio '+state.version+' · 720p · 30 fps'}</p></div>
       <label className="title-field"><span className="sr-only">Título da live</span><input aria-label="Título da live" value={title} onChange={e=>setTitle(e.target.value)} maxLength={100} disabled={busy||active} placeholder="Título da live · o que vamos fazer hoje?"/></label>
-      <div className="main-actions"><button className="secondary" onClick={()=>run('site')}><Monitor size={17}/> Abrir site</button>{active?<><button className="danger" disabled={busy} onClick={()=>{if(window.confirm('Encerrar a sessão e interromper o envio de vídeo?'))run('end');}}><Square size={16}/> {session.status==='waiting'?'Sair da fila':'Encerrar live'}</button>{['reserved','reconnecting'].includes(session.status)&&!state.transmitting&&<button className="primary" disabled={busy||!state.prepared} onClick={()=>run('resume')}>Estou pronta · transmitir</button>}</>:<button className="primary" disabled={busy||!state.prepared||!title.trim()||session&&!owned} onClick={()=>run('start',{title})}><Radio size={19}/> Iniciar live</button>}</div></footer>
+      <div className="main-actions"><button className="secondary" onClick={()=>run('site')}><Monitor size={17}/> Abrir site</button>{active?<><button className="danger" disabled={busy} onClick={()=>{if(window.confirm('Encerrar a sessão e interromper o envio de vídeo?'))run('end');}}><Square size={16}/> {session.status==='waiting'?'Sair da fila':'Encerrar live'}</button>{['reserved','reconnecting'].includes(session.status)&&!state.transmitting&&<button className="primary" disabled={busy||!state.prepared||!inSync||!canApply} onClick={()=>run('resume')}>Estou pronta · transmitir</button>}</>:<button className="primary" disabled={busy||!state.prepared||!layers.length||!inSync||!canApply||!title.trim()||session&&!owned} onClick={()=>run('start',{title})}><Radio size={19}/> Iniciar live</button>}</div></footer>
   </main>;
 }
 createRoot(document.getElementById('root')).render(<App/>);
