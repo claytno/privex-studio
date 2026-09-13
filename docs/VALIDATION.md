@@ -104,3 +104,19 @@ downloaded signed-installer test remain necessary before a signed public release
   HTTPS download of the published file matched the built hash.
 - Not executed: the installer itself, an actual beta.5 to beta.6 upgrade on a
   clean Windows user, and Smart App Control/SmartScreen behaviour.
+
+## beta.7 fixes and publication (2026-09-13)
+
+- 64 Node tests pass (preview.close refused during a live, no-op when already
+  closed). Layout smoke: the source settings sheet opens on click, sits below
+  the preview without hiding it (bounds stay non-zero), Escape closes it, and
+  Fechar prévia is only offered without a reserved or live session. UI smoke,
+  protocol test, native preview smoke and source audit pass on the rebuilt
+  engine (version resource beta.7).
+- Installer 306058912 bytes, SHA-256
+  255b02c86275d8a3f029a1e35a2dc6cf6dd3ee395ef2bda2b2ffd43028eb669f, unsigned
+  beta. Packaged app started against a throwaway profile. Published at the
+  immutable URL; signed latest.json verified with the shipping updater from
+  beta.5, beta.6 (offered) and beta.7 (up to date); full HTTPS download hash
+  matched.
+- Not executed: real upgrade on a clean Windows user, physical camera.

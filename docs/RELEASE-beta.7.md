@@ -17,5 +17,8 @@ Correções de uso sobre a beta.6.
   no componente compartilhado do chat.
 
 O instalador continua beta sem assinatura de publicador; identidade do
-instalador, perfil e chave de atualização inalterados. Sem validação com
+instalador, perfil e chave de atualização inalterados. Publicado em 2026-09-13
+em `downloads/privex-studio/0.2.0-beta.7/` (306058912 bytes, SHA-256
+`255b02c86275d8a3f029a1e35a2dc6cf6dd3ee395ef2bda2b2ffd43028eb669f`); o
+`latest.json` assinado oferece a beta.7 às betas 3, 5 e 6. Sem validação com
 câmera física nesta versão.
