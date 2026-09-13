@@ -120,3 +120,21 @@ downloaded signed-installer test remain necessary before a signed public release
   beta.5, beta.6 (offered) and beta.7 (up to date); full HTTPS download hash
   matched.
 - Not executed: real upgrade on a clean Windows user, physical camera.
+
+## beta.8 game capture and publication (2026-09-13)
+
+- Engine rebuilt with the upstream graphics-hook DLLs, inject-helper and
+  get-graphics-offsets executables kept under data/obs-plugins/win-capture (the
+  build script previously deleted every binary there, which made game capture
+  impossible). Protocol test: 26 checks, including a game layer in
+  any_fullscreen mode that prepares without a running game (ready=false) and a
+  game layer bound to a missing window being refused. Window capture now
+  requests Windows Graphics Capture.
+- 64 Node tests, layout smoke (game listed among sources), UI smoke and source
+  audit pass. Packaged app started against a throwaway profile.
+- Installer 306662516 bytes, SHA-256
+  c86bbed21178536e9e586c0dad5ca4f247de8fb48c27b491f0c41ebe6073c561, unsigned
+  beta. Published at the immutable URL; signed latest.json offers beta.8 to
+  beta.6 and beta.7 and reports beta.8 as current; HTTPS download hash matched.
+- Not validated: an actual game hooked on this server (no GPU game available),
+  anticheat behaviour, WGC on Windows 10 (yellow border), physical camera.

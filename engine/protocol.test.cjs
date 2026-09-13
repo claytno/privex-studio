@@ -32,7 +32,8 @@ async function protocol() {
   assert.equal((await call('unknown')).ok, false);
   assert.equal((await call('resize', {bounds:{width:-1,height:100}})).ok, false);
   const devices = await call('enumerate'); assert.equal(devices.ok, true);
-  for (const type of ['cameras','microphones','desktops','displays','windows']) assert.ok(Array.isArray(devices.result[type]));
+  for (const type of ['cameras','microphones','desktops','displays','windows','games']) assert.ok(Array.isArray(devices.result[type]));
+  assert.equal(devices.result.games[0].id, 'any_fullscreen');
   assert.equal((await call('prepare', {sourceType:'camera',cameraId:'missing-device'})).ok, false);
   assert.equal((await call('status')).result.prepared, false);
   assert.equal((await call('prepare', {layers:[]})).ok, false);
@@ -50,6 +51,10 @@ async function protocol() {
   assert.equal((await call('reconfigure', {layers:[{kind:'camera',id:'missing-device'}],width:1280,height:720,fps:30})).ok, false, 'Unavailable device preserves the composition');
   assert.equal((await call('status')).result.layers.length, 1);
   assert.equal((await call('stop')).result.prepared, false);
+  const game = await call('prepare', {layers:[{kind:'game',id:'any_fullscreen'},{kind:'text',text:'Aguardando o jogo'}],width:1280,height:720,fps:30});
+  assert.equal(game.ok, true, JSON.stringify(game)); assert.equal(game.result.layers[0].kind, 'game'); assert.equal(game.result.layers[0].ready, false, 'No fullscreen game is running in the test');
+  assert.equal((await call('prepare', {layers:[{kind:'game',id:'missing-window'}]})).ok, false);
+  assert.equal((await call('stop')).result.prepared, false);
   assert.equal((await call('mute', {muted:'yes'})).ok, false);
   assert.equal((await call('mute', {muted:true})).ok, true);
   assert.equal((await call('stop')).result.state, 'idle');
@@ -58,7 +63,7 @@ async function protocol() {
   const timeout = setTimeout(() => child.kill(), 10000);
   assert.equal(await exited, 0); clearTimeout(timeout);
   assert.equal(stderr, '');
-  process.stdout.write(JSON.stringify({ok:true,synthetic:syntheticResult,protocolChecks:22,deviceEnumeration:true,eofCleanup:true,networkPublish:false})+'\n');
+  process.stdout.write(JSON.stringify({ok:true,synthetic:syntheticResult,protocolChecks:26,deviceEnumeration:true,eofCleanup:true,networkPublish:false})+'\n');
  } finally { child.kill(); }
 }
 protocol().catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -52,10 +52,15 @@ foreach ($module in $modules) {
   }
  }
 }
+# Game capture needs the upstream graphics hook and its injector next to win-capture data; these are the only binaries kept there.
+$hookData = Join-Path $dataTarget 'win-capture'
+New-Item -ItemType Directory -Force $hookData | Out-Null
+$keptBinaries = @('graphics-hook32.dll','graphics-hook64.dll','inject-helper32.exe','inject-helper64.exe','get-graphics-offsets32.exe','get-graphics-offsets64.exe')
+foreach ($hook in $keptBinaries) { Copy-Item -LiteralPath (Join-Path $runtime "data\obs-plugins\win-capture\$hook") -Destination $hookData -Force }
 # Remove development/virtual-camera installers left by an older local package pass.
 # Every resolved file is validated inside this task's engine runtime before deletion.
 $resolvedDataTarget = [System.IO.Path]::GetFullPath($dataTarget).TrimEnd('\') + '\'
-Get-ChildItem -LiteralPath $dataTarget -File -Recurse | Where-Object Extension -In @('.pdb','.exe','.bat','.dll') | ForEach-Object {
+Get-ChildItem -LiteralPath $dataTarget -File -Recurse | Where-Object { $_.Extension -in @('.pdb','.exe','.bat','.dll') -and -not ($_.Directory.Name -eq 'win-capture' -and $_.Name -in $keptBinaries) } | ForEach-Object {
  $resolvedCandidate = [System.IO.Path]::GetFullPath($_.FullName)
  if (-not $resolvedCandidate.StartsWith($resolvedDataTarget, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected runtime cleanup path' }
  Remove-Item -LiteralPath $resolvedCandidate -Force

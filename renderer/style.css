@@ -80,3 +80,5 @@
 .layer-dialog>header{display:flex;align-items:center;gap:10px;padding:10px 12px 10px 16px;border-bottom:1px solid #2a2733}.layer-dialog h3{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:650;color:#efe6ff;margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.layer-dialog>header .dock-hint{flex:1;padding:0;text-align:right}.layer-dialog>header .icon-button{background:transparent;border:0;padding:6px;border-radius:6px;color:#b6acc8}
 .layer-dialog .layer-props{border-top:0;background:transparent;padding:14px 16px;gap:10px 16px;flex:1 1 auto;overflow:auto}.layer-dialog .layer-props label{font-size:12px}.layer-dialog .layer-props select,.layer-dialog .layer-props input:not([type=range]){padding:9px 10px;font-size:13px}
 .layer-dialog>footer{display:flex;justify-content:space-between;gap:10px;padding:10px 16px;border-top:1px solid #2a2733;background:#131219}.layer-dialog>footer button{font-size:13px}
+
+.dock-empty p{margin:0 0 8px}.quick-add{display:flex;flex-wrap:wrap;gap:6px}.quick-add button{font-size:11px;padding:6px 9px}.dock-empty .fine{margin-top:8px}

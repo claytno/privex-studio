@@ -61,9 +61,10 @@ DWORD parentProcessId() {
  if (Process32First(snapshot, &entry)) do { if (entry.th32ProcessID == GetCurrentProcessId()) { parent = entry.th32ParentProcessID; break; } } while (Process32Next(snapshot, &entry));
  CloseHandle(snapshot); return parent;
 }
-bool captureKind(const QString &kind) { return kind == "camera" || kind == "window" || kind == "display"; }
-const char *captureType(const QString &kind) { return kind == "camera" ? "dshow_input" : kind == "window" ? "window_capture" : "monitor_capture"; }
-const char *captureProperty(const QString &kind) { return kind == "camera" ? "video_device_id" : kind == "window" ? "window" : "monitor_id"; }
+bool captureKind(const QString &kind) { return kind == "camera" || kind == "window" || kind == "display" || kind == "game"; }
+const char *captureType(const QString &kind) { return kind == "camera" ? "dshow_input" : kind == "window" ? "window_capture" : kind == "game" ? "game_capture" : "monitor_capture"; }
+const char *captureProperty(const QString &kind) { return kind == "camera" ? "video_device_id" : kind == "window" || kind == "game" ? "window" : "monitor_id"; }
+const char *anyFullscreen = "any_fullscreen";
 
 // The audio callback retains numbers only; raw audio never crosses the native process.
 struct AudioMeter {
@@ -250,7 +251,7 @@ struct Engine {
   const double size = spec.value("size").toDouble(0.3); require(std::isfinite(size) && size >= 0.1 && size <= 0.7, "Invalid layer size");
   require(!spec.contains("visible") || spec.value("visible").isBool(), "Invalid layer visibility");
   QJsonObject n{{"kind", kind}, {"fit", fit}, {"corner", corner}, {"size", size}, {"visible", spec.value("visible").toBool(true)}};
-  if (captureKind(kind)) { const auto id = stringArg(spec, "id"); require(!id.isEmpty() && hasId(list(captureType(kind), captureProperty(kind)), id), "Selected video device is unavailable"); n.insert("id", id); }
+  if (captureKind(kind)) { const auto id = stringArg(spec, "id"); require(!id.isEmpty() && ((kind == "game" && id == anyFullscreen) || hasId(list(captureType(kind), captureProperty(kind)), id)), "Selected video device is unavailable"); n.insert("id", id); }
   else if (kind == "image") {
    const auto file = stringArg(spec, "file", 1024); QFileInfo info(file); const auto suffix = info.suffix().toLower();
    require(info.isAbsolute() && info.isFile() && info.size() > 0 && info.size() <= 25 * 1024 * 1024 && (suffix == "png" || suffix == "jpg" || suffix == "jpeg" || suffix == "gif" || suffix == "bmp" || suffix == "webp"), "Image file is unavailable");
@@ -282,8 +283,15 @@ struct Engine {
  obs_source_t *createLayerSource(const QJsonObject &n) {
   const auto kind = n.value("kind").toString(); obs_source_t *source = nullptr;
   if (captureKind(kind)) {
-   auto *settings = obs_data_create(); obs_data_set_string(settings, captureProperty(kind), n.value("id").toString().toUtf8().constData());
-   if (kind == "window") { obs_data_set_int(settings, "priority", 1); obs_data_set_bool(settings, "capture_audio", false); } // Exact selected title; never whole-screen fallback.
+   auto *settings = obs_data_create(); const auto id = n.value("id").toString();
+   if (kind == "game") {
+    // Upstream game hook: DirectX/OpenGL/Vulkan games, windowed or exclusive fullscreen. "any_fullscreen" waits for the next fullscreen game.
+    obs_data_set_string(settings, "capture_mode", id == anyFullscreen ? "any_fullscreen" : "window");
+    if (id != anyFullscreen) obs_data_set_string(settings, "window", id.toUtf8().constData());
+    obs_data_set_int(settings, "priority", 1); obs_data_set_bool(settings, "capture_cursor", true); obs_data_set_bool(settings, "anti_cheat_hook", true); obs_data_set_bool(settings, "capture_overlays", false);
+   } else obs_data_set_string(settings, captureProperty(kind), id.toUtf8().constData());
+   // Windows Graphics Capture reads GPU-rendered windows (games, browsers); BitBlt returns black for them. The plugin falls back to BitBlt where WGC is unsupported.
+   if (kind == "window") { obs_data_set_int(settings, "priority", 1); obs_data_set_int(settings, "method", 2); obs_data_set_bool(settings, "cursor", true); obs_data_set_bool(settings, "capture_audio", false); } // Exact selected title; never whole-screen fallback.
    source = obs_source_create_private(captureType(kind), "Privex video", settings); obs_data_release(settings); require(source, "Video capture creation failed");
    obs_source_set_audio_mixers(source, 0); obs_source_set_muted(source, true); // Camera embedded audio must not bypass the selected/muted microphone.
   } else if (kind == "image") {
@@ -393,7 +401,10 @@ struct Engine {
    overlayConfig = next;
   } catch (...) { clearLayer(overlaySources); overlayConfig={}; throw; }
  }
- QJsonObject enumerate() { init(); return {{"cameras", list("dshow_input", "video_device_id")}, {"microphones", list("wasapi_input_capture", "device_id")}, {"desktops", list("wasapi_output_capture", "device_id")}, {"displays", list("monitor_capture", "monitor_id")}, {"windows", list("window_capture", "window")}}; }
+ QJsonObject enumerate() {
+  init(); QJsonArray games{QJsonObject{{"id", anyFullscreen}, {"name", QString::fromUtf8("Qualquer jogo em tela cheia")}}}; for (const auto &w : list("game_capture", "window")) games.append(w);
+  return {{"cameras", list("dshow_input", "video_device_id")}, {"microphones", list("wasapi_input_capture", "device_id")}, {"desktops", list("wasapi_output_capture", "device_id")}, {"displays", list("monitor_capture", "monitor_id")}, {"windows", list("window_capture", "window")}, {"games", games}};
+ }
  void volume(const QJsonObject &args) {
   auto channel = stringArg(args,"channel",16); double value = args.value("volume").toDouble(-1);
   require((channel=="microphone" || channel=="desktop") && std::isfinite(value) && value>=0 && value<=100,"Invalid volume");

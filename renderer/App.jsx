@@ -1,15 +1,15 @@
 import React,{useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Camera,Mic,Monitor,Radio,LogOut,MessageSquare,Gift,ArrowRight,ShieldCheck,RefreshCw,Square,Video,VolumeX,Image,Type,Eye,EyeOff,ChevronUp,ChevronDown,Trash2,Plus,Layers,AppWindow,Film,Pause,Play,Pencil,X,Check} from 'lucide-react';
+import {Camera,Mic,Monitor,Radio,LogOut,MessageSquare,Gift,ArrowRight,ShieldCheck,RefreshCw,Square,Video,VolumeX,Image,Type,Eye,EyeOff,ChevronUp,ChevronDown,Trash2,Plus,Layers,AppWindow,Film,Pause,Play,Pencil,X,Check,Gamepad2} from 'lucide-react';
 import LiveChatPanel from "../shared/pages/live/LiveChatPanel.jsx";
 import LiveCommerceStudio from "../shared/pages/live/LiveCommerceStudio.jsx";
 import {invoke} from "./bridge.js";import {setUser} from "./auth.js";import {setSession} from "./adapter.js";
 import "./style.css";
 import useLivePolling from "../shared/hooks/useLivePolling.js";
 const money=value=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format((value||0)/100);
-const CAPTURE=['camera','window','display'];
-const KIND_LABELS={camera:'Câmera',window:'Janela',display:'Tela inteira',image:'Imagem',text:'Texto'};
-const KIND_ICONS={camera:Camera,window:AppWindow,display:Monitor,image:Image,text:Type};
+const CAPTURE=['camera','window','display','game'];
+const KIND_LABELS={camera:'Câmera',window:'Janela',display:'Tela inteira',game:'Jogo',image:'Imagem',text:'Texto'};
+const KIND_ICONS={camera:Camera,window:AppWindow,display:Monitor,game:Gamepad2,image:Image,text:Type};
 const DEFAULT_LAYOUT={version:1,scenes:[{id:'principal',name:'Principal',layers:[]}],activeScene:'principal',microphoneId:'',desktopId:'',portrait:false,fresh:true};
 let uidCounter=0;const uid=()=>'l'+(++uidCounter)+'-'+Date.now().toString(36);
 const withUid=layer=>({...layer,uid:uid(),fileName:layer.file?layer.file.split(/[\\/]/).pop():''});
@@ -61,7 +61,7 @@ function UpdatePreferences({state,busy,run}){
 function App(){
   const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false);
   const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[applying,setApplying]=useState(false);
-  const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),applied=useRef(''),failed=useRef(''),autoOpened=useRef(false),rate=useRef({bytes:0,at:0,kbps:0});
+  const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),applied=useRef(''),failed=useRef(''),autoOpened=useRef(false),suggestedScenes=useRef(new Set()),rate=useRef({bytes:0,at:0,kbps:0});
   const session=state.studio?.session;const owned=session?.managed_by_device;const displayStatus=session?.status==='live'&&!session.media_ready?'starting':session?.status;const busy=localBusy||state.busy;const sessionActive=!!session&&['waiting','reserved','starting','live','reconnecting','ending'].includes(session.status);const active=owned&&sessionActive;const displayPortrait=state.prepared?(state.canvasPortrait??portrait):portrait;
   const update=value=>{audioState.current={microphone:value.microphoneVolume??100,desktop:value.desktopVolume??100};setUser(value.user);setSession(value.studio?.session?.managed_by_device?value.studio.session.id:null);setMuted(!!value.muted);setState(value);};
   useEffect(()=>{invoke('snapshot').then(update);const cleanup=window.privex.onState(update);const timer=setInterval(()=>invoke('snapshot').then(update).catch(()=>{}),5000);return()=>{cleanup();clearInterval(timer);};},[]);
@@ -94,11 +94,11 @@ function App(){
   useEffect(()=>{if(!state.user)return;void enumerate();const timer=setInterval(()=>{if(!document.hidden)void enumerate();},15000);const refresh=()=>void enumerate();window.addEventListener('focus',refresh);return()=>{clearInterval(timer);window.removeEventListener('focus',refresh);};},[state.user?.id]);
   // First run: suggest the first camera as the only source. The capture only starts when the user opens the preview.
   useEffect(()=>{
-    if(!layoutFresh.current||initialDevices.current.camera||!devices||!scene||scene.layers.length)return;const firstCamera=devices.cameras?.[0];if(firstCamera==null)return;
-    initialDevices.current.camera=true;setLayers(()=>[withUid({kind:'camera',id:String(firstCamera.id),fit:'fit',corner:'br',size:.3,visible:true,name:''})]);
+    if(!devices||!scene||scene.layers.length||suggestedScenes.current.has(scene.id))return;const firstCamera=devices.cameras?.[0];if(firstCamera==null)return;
+    suggestedScenes.current.add(scene.id);initialDevices.current.camera=true;setLayers(()=>[withUid({kind:'camera',id:String(firstCamera.id),fit:'fit',corner:'br',size:.3,visible:true,name:''})]);
   },[devices,scene?.id]);
   useEffect(()=>{setMicLevel(state.microphoneVolume??100);setDesktopLevel(state.desktopVolume??100);},[state.microphoneVolume,state.desktopVolume]);
-  const listFor=kind=>kind==='camera'?devices?.cameras:kind==='window'?devices?.windows:kind==='display'?devices?.displays:null;
+  const listFor=kind=>kind==='camera'?devices?.cameras:kind==='window'?devices?.windows:kind==='display'?devices?.displays:kind==='game'?devices?.games:null;
   const available=(items,id)=>!id||(items||[]).some(item=>String(item.id??item.value)===id);
   const deviceName=(kind,id)=>{const item=(listFor(kind)||[]).find(entry=>String(entry.id??entry.value)===id);return item?item.name??item.label:'';};
   const layerMissing=layer=>CAPTURE.includes(layer.kind)&&!!devices&&!available(listFor(layer.kind),layer.id);
@@ -196,13 +196,13 @@ function App(){
           <p className="dock-hint">Clique para trocar, inclusive ao vivo. A pausa cobre qualquer cena.</p>
         </section>
         <section className="dock dock-sources" aria-label="Fontes"><header><h3><Layers size={14}/> Fontes</h3><div className="dock-actions"><button className="icon-button" aria-label={devices?'Atualizar equipamentos':'Buscar equipamentos'} title={devices?'Atualizar lista de equipamentos':'Buscar equipamentos'} disabled={busy} onClick={enumerate}><RefreshCw size={14}/></button><button className="icon-button" aria-label="Adicionar fonte" aria-expanded={adding} disabled={busy||layers.length>=6} onClick={()=>setAdding(value=>!value)}><Plus size={15}/></button></div></header>
-          {adding&&<div className="add-panel">{['camera','window','display','image','text'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" onClick={()=>addLayer(kind)}><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>}
+          {adding&&<div className="add-panel">{['camera','window','display','game','image','text'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" onClick={()=>addLayer(kind)}><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>}
           {layers.length?<ul className="layer-list">{layers.map((layer,index)=>{const Icon=KIND_ICONS[layer.kind],missing=layerMissing(layer);return <li key={layer.uid} className={(layer.uid===selected?'is-selected':'')+(layer.visible===false?' is-hidden':'')}>
             <button className="layer-main" onClick={()=>setSelected(layer.uid===selected?null:layer.uid)}><Icon size={14}/><span className="layer-name">{layerLabel(layer)}</span>{missing?<span className="layer-flag is-missing">desconectado</span>:state.prepared&&inSync&&layer.visible!==false&&layerReady(index)===false?<span className="layer-flag">sem sinal</span>:null}</button>
             <button className="icon-button" aria-label={layer.visible===false?'Mostrar fonte':'Ocultar fonte'} aria-pressed={layer.visible!==false} onClick={()=>toggleLayer(layer)}>{layer.visible===false?<EyeOff size={14}/>:<Eye size={14}/>}</button>
             <button className="icon-button" aria-label="Trazer para frente" disabled={index===0} onClick={()=>moveLayer(layer,-1)}><ChevronUp size={14}/></button>
             <button className="icon-button" aria-label="Enviar para trás" disabled={index===layers.length-1} onClick={()=>moveLayer(layer,1)}><ChevronDown size={14}/></button>
-            <button className="icon-button" aria-label="Remover fonte" onClick={()=>removeLayer(layer)}><Trash2 size={14}/></button></li>;})}</ul>:<p className="dock-empty">Nenhuma fonte ainda. Adicione a câmera, uma janela, a tela, uma imagem ou um texto. A primeira da lista aparece na frente.</p>}
+            <button className="icon-button" aria-label="Remover fonte" onClick={()=>removeLayer(layer)}><Trash2 size={14}/></button></li>;})}</ul>:<div className="dock-empty"><p>Nenhuma fonte ainda. O que vai aparecer no vídeo?</p><div className="quick-add">{['camera','game','display','window'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" disabled={busy} onClick={()=>addLayer(kind)}><Plus size={13}/><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>{devices&&!devices.cameras?.length&&<p className="fine">Nenhuma câmera encontrada. Feche outros programas que usam a câmera e clique em Atualizar equipamentos.</p>}</div>}
         </section>
         <section className="dock dock-audio" aria-label="Áudio">
           <header><h3><Mic size={14}/> Áudio</h3></header>
@@ -220,13 +220,15 @@ function App(){
       {selectedLayer&&(()=>{const Icon=KIND_ICONS[selectedLayer.kind];return <><div className="sheet-backdrop" onClick={()=>setSelected(null)}/><div className="layer-dialog" role="dialog" aria-modal="true" aria-label="Ajustes da fonte" onKeyDown={e=>{if(e.key==='Escape')setSelected(null);}}>
         <header><h3><Icon size={15}/> {layerLabel(selectedLayer)}</h3><span className="dock-hint">{KIND_LABELS[selectedLayer.kind]} · as mudanças valem na hora</span><button className="icon-button" aria-label="Fechar ajustes" onClick={()=>setSelected(null)}><X size={16}/></button></header>
         <div className="layer-props">
-            {CAPTURE.includes(selectedLayer.kind)&&<label>{KIND_LABELS[selectedLayer.kind]}<select aria-label={'Equipamento da fonte'} disabled={!devices} value={selectedLayer.id||''} onChange={e=>patchLayer(selectedLayer.uid,{id:e.target.value})}><option value="">Escolha um equipamento</option>{layerMissing(selectedLayer)&&<option value={selectedLayer.id}>Equipamento desconectado</option>}{options(listFor(selectedLayer.kind))}</select></label>}
+            {CAPTURE.includes(selectedLayer.kind)&&<label>{KIND_LABELS[selectedLayer.kind]}<select aria-label={'Equipamento da fonte'} disabled={!devices} value={selectedLayer.id||''} onChange={e=>patchLayer(selectedLayer.uid,{id:e.target.value})}><option value="">Escolha um equipamento</option>{layerMissing(selectedLayer)&&<option value={selectedLayer.id}>Equipamento desconectado</option>}{options(listFor(selectedLayer.kind))}</select>{devices&&!(listFor(selectedLayer.kind)||[]).length&&<span className="fine">{selectedLayer.kind==='camera'?'Nenhuma câmera encontrada. Conecte a câmera, feche outros programas que a usam e clique em Atualizar equipamentos.':'Nada encontrado. Clique em Atualizar equipamentos.'}</span>}</label>}
             {selectedLayer.kind==='text'&&<label>Texto<input maxLength={120} value={selectedLayer.text||''} onChange={e=>patchLayer(selectedLayer.uid,{text:e.target.value})}/></label>}
             {selectedLayer.kind==='image'&&<div className="image-row"><span title={selectedLayer.file}>{selectedLayer.fileName}</span><button className="text-button" disabled={busy} onClick={async()=>{const picked=await run('image.pick');if(picked)patchLayer(selectedLayer.uid,{file:picked.file,fileName:picked.name});}}>Trocar imagem</button></div>}
             <label>Nome<input maxLength={40} placeholder={layerLabel(selectedLayer)} value={selectedLayer.name||''} onChange={e=>patchLayer(selectedLayer.uid,{name:e.target.value})}/></label>
             <label>Posição<select aria-label="Posição da fonte" value={selectedLayer.fit||'fit'} onChange={e=>patchLayer(selectedLayer.uid,{fit:e.target.value})}><option value="fit">Tela inteira, imagem completa</option><option value="fill">Preencher, cortando as bordas</option><option value="corner">Em um canto (sobre as outras)</option></select></label>
             {selectedLayer.fit==='corner'&&<div className="corner-row"><div className="corner-grid" role="group" aria-label="Canto">{[['tl','Canto superior esquerdo'],['tr','Canto superior direito'],['bl','Canto inferior esquerdo'],['br','Canto inferior direito']].map(([corner,label])=><button key={corner} aria-label={label} aria-pressed={selectedLayer.corner===corner} className={selectedLayer.corner===corner?'is-active':''} onClick={()=>patchLayer(selectedLayer.uid,{corner})}/>)}</div><label className="size-field">Tamanho <strong>{Math.round((selectedLayer.size||.3)*100)}%</strong><input aria-label="Tamanho da fonte no canto" type="range" min="15" max="60" step="5" value={Math.round((selectedLayer.size||.3)*100)} onChange={e=>patchLayer(selectedLayer.uid,{size:Number(e.target.value)/100})}/></label></div>}
             {selectedLayer.kind==='display'&&<p className="fine">Tudo nessa tela pode aparecer, inclusive este gerenciador. Prefira compartilhar uma janela.</p>}
+            {selectedLayer.kind==='game'&&<p className="fine">Captura o jogo por dentro (DirectX, OpenGL ou Vulkan), em janela ou tela cheia. Com "Qualquer jogo em tela cheia" a imagem aparece quando o jogo abrir em tela cheia. Se o anticheat do jogo bloquear o hook, use Tela inteira.</p>}
+            {selectedLayer.kind==='window'&&<p className="fine">Para jogos, prefira a fonte Jogo: a captura de janela pode ficar preta em programas que desenham na placa de vídeo.</p>}
         </div>
         <footer><button className="secondary" onClick={()=>{removeLayer(selectedLayer);}}><Trash2 size={14}/> Remover fonte</button><button className="primary" autoFocus onClick={()=>setSelected(null)}><Check size={15}/> Concluir</button></footer>
       </div></>;})()}

@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),output=path.join(root,'test-results','la
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const id='01234567-89ab-4cde-8fab-0123456789ab';
 const user={id:101,username:'conta_sintetica',name:'Conta de demonstração'};
-let state={version:'teste-local',pendingAccount:user,user:null,studio:null,prepared:false,busy:false};const calls=[];let equipment={cameras:[],microphones:[],desktops:[],windows:[],displays:[]};
+let state={version:'teste-local',pendingAccount:user,user:null,studio:null,prepared:false,busy:false};const calls=[];let equipment={cameras:[],microphones:[],desktops:[],windows:[],displays:[],games:[{id:'any_fullscreen',name:'Qualquer jogo em tela cheia'}]};
 const last=command=>calls.filter(c=>c.command===command).at(-1);
 protocol.registerSchemesAsPrivileged([{scheme:'privex',privileges:{standard:true,secure:true,supportFetchAPI:true}}]);
 app.setPath('userData',path.join(output,'profile'));

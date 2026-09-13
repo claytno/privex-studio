@@ -29,8 +29,8 @@ function verificationURL(input) {
   return u.href;
 }
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
-const LAYER_KINDS = ['camera', 'window', 'display', 'image', 'text'];
-const CAPTURE_KINDS = ['camera', 'window', 'display'];
+const LAYER_KINDS = ['camera', 'window', 'display', 'game', 'image', 'text'];
+const CAPTURE_KINDS = ['camera', 'window', 'display', 'game'];
 const CORNERS = ['tl', 'tr', 'bl', 'br'];
 function cleanText(value, max, message) {
   if (typeof value !== 'string' || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error(message);
