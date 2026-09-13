@@ -246,3 +246,30 @@ downloaded signed-installer test remain necessary before a signed public release
   beta.10, beta.11 and beta.12 and not to itself; HTTPS download hash matched.
 - Not validated: a real game alt-tabbed on this server, which has no game GPU,
   and the end-to-end delay measured with a real broadcast and a real viewer.
+
+## beta.14 one window/game source, scene settings and preview box (2026-09-13)
+
+- The separate game source left the add menu; "Janela / Jogo" is the single
+  source for a game, and both the add panel and the source settings say the game
+  must run in windowed — or borderless fullscreen — mode. Scenes saved with the
+  old game source keep working: the kind is still accepted and still labelled.
+- Scene name, transition style, duration, duplicate and remove moved into a
+  scene dialog opened by the pencil (or a double click on the name), so the
+  scene dock is the list again. Layout smoke opens the dialog, changes the
+  animation there, duplicates through it and asserts the dock has no transition
+  row.
+- The CSS-to-native conversion for the preview now uses the pixel ratio reported
+  by the page that was laid out, instead of a separate zoom x display-scale
+  calculation in the main process; a window moved to a screen with different
+  scaling repositions the preview. Layout smoke additionally asserts, at four
+  window sizes, that the preview box stays inside its frame, never covers the
+  caption and never reaches the top bar, and that the page reports its ratio.
+- 80 Node tests, engine self-test, protocol test, layout smoke, UI smoke, native
+  preview smoke and the source audit pass. Packaged app starts.
+- Installer 307546832 bytes, SHA-256
+  6e966e9ad96039100665c2a7f39b2cc6daa37bfffd71030c89c08d67258ee5ba, unsigned
+  beta; manifest offers beta.14 to beta.12 and beta.13 and not to itself; HTTPS
+  download hash matched.
+- Not reproduced here: the preview reported out of its box. Measured at twelve
+  window size and zoom combinations, the box stayed inside the frame every time,
+  so the change above targets the remaining suspect, the pixel-ratio conversion.

@@ -11,7 +11,9 @@ import {createSceneSync,shouldSuggestInitialCamera} from './scene-sync.mjs';
 import useLayoutSave from './useLayoutSave.js';
 const money=value=>new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format((value||0)/100);
 const CAPTURE=['camera','window','display','game'];
-const KIND_LABELS={camera:'Câmera',window:'Janela',display:'Tela inteira',game:'Jogo',image:'Imagem',text:'Texto'};
+const KIND_LABELS={camera:'Câmera',window:'Janela / Jogo',display:'Tela inteira',game:'Jogo (captura antiga)',image:'Imagem',text:'Texto'};
+// Deixe o jogo em janela (ou janela sem bordas em tela cheia) e escolha a janela dele aqui.
+const GAME_HINT='Para transmitir um jogo, deixe o jogo em modo janela — ou janela sem bordas em tela cheia — e escolha a janela dele nesta lista. Em tela cheia exclusiva a imagem pode ficar preta.';
 const KIND_ICONS={camera:Camera,window:AppWindow,display:Monitor,game:Gamepad2,image:Image,text:Type};
 const DEFAULT_TRANSITION={style:'slide',durationMs:350};
 const DEFAULT_LAYOUT={version:1,scenes:[{id:'principal',name:'Principal',layers:[]}],activeScene:'principal',microphoneId:'',desktopId:'',portrait:false,transition:DEFAULT_TRANSITION,fresh:true};
@@ -55,7 +57,9 @@ function previewBounds(element){
   }
   const style=getComputedStyle(element),number=value=>Number.parseFloat(value)||0;
   const left=number(style.borderLeftWidth)+number(style.paddingLeft),right=number(style.borderRightWidth)+number(style.paddingRight),top=number(style.borderTopWidth)+number(style.paddingTop),bottom=number(style.borderBottomWidth)+number(style.paddingBottom);
-  return{x:rect.x+left,y:rect.y+top,width:Math.max(0,rect.width-left-right),height:Math.max(0,rect.height-top-bottom)};
+  // The ratio the page itself was laid out with converts these to native pixels. Reading it here
+  // keeps the preview in place when the window moves to a screen with different scaling.
+  return{x:rect.x+left,y:rect.y+top,width:Math.max(0,rect.width-left-right),height:Math.max(0,rect.height-top-bottom),ratio:devicePixelRatio};
 }
 function UpdateBanner({info,blocked,run}){
   if(!info?.available&&info?.status!=='error')return null;
@@ -80,8 +84,8 @@ function useInteractionAlert(sessionId,interactionSeq,enabled){
   },[sessionId,interactionSeq,enabled]);
 }
 function App(){
-  const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false),[alertSound,setAlertSound]=useState(isSoundEnabled),[titleEdit,setTitleEdit]=useState(false),[transition,setTransition]=useState(DEFAULT_TRANSITION);
-  const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[syncState,setSyncState]=useState({applying:false,appliedKey:'',failedKey:'',error:'',retrying:false}),[previewError,setPreviewError]=useState('');
+  const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false),[alertSound,setAlertSound]=useState(isSoundEnabled),[titleEdit,setTitleEdit]=useState(false),[transition,setTransition]=useState(DEFAULT_TRANSITION),[sceneEdit,setSceneEdit]=useState(false);
+  const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[syncState,setSyncState]=useState({applying:false,appliedKey:'',failedKey:'',error:'',retrying:false}),[previewError,setPreviewError]=useState('');
   const [sourceNotice,setSourceNotice]=useState('');
   const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),initialScene=useRef(''),autoOpened=useRef(false),suggestedScenes=useRef(new Set()),editScope=useRef({}),accountScope=useRef(null),rate=useRef({bytes:0,at:0,kbps:0});
   const synchronizer=useMemo(()=>createSceneSync({prepare:payload=>invoke('prepare',payload),onState:setSyncState}),[]);
@@ -106,7 +110,7 @@ function App(){
   async function run(name,data){setError('');setLocalBusy(true);try{return await invoke(name,data);}catch(e){setError(e.message);}finally{setLocalBusy(false);}}
   // Saved scenes arrive with the first snapshot; a missing layout (older host) behaves like a fresh installation.
   useEffect(()=>{
-    if(accountScope.current!==state.user?.id){accountScope.current=state.user?.id;layoutLoaded.current=false;autoOpened.current=false;initialDevices.current={camera:false,microphone:false};suggestedScenes.current=new Set();setScenes([]);setActiveScene('');setMic('');setDesktop('');setPortrait(false);setSelected(null);setAdding(false);setRenaming(null);setDevices(null);setError('');setSourceNotice('');}
+    if(accountScope.current!==state.user?.id){accountScope.current=state.user?.id;layoutLoaded.current=false;autoOpened.current=false;initialDevices.current={camera:false,microphone:false};suggestedScenes.current=new Set();setScenes([]);setActiveScene('');setMic('');setDesktop('');setPortrait(false);setSelected(null);setAdding(false);setSceneEdit(false);setDevices(null);setError('');setSourceNotice('');}
     if(layoutLoaded.current||!state.user)return;const layout=state.layout||DEFAULT_LAYOUT;layoutLoaded.current=true;layoutFresh.current=layout.fresh===true||!state.layout;initialScene.current=layout.activeScene;
     setScenes(layout.scenes.map(scene=>({...scene,layers:scene.layers.map(withUid)})));setActiveScene(layout.activeScene);setMic(layout.microphoneId||'');setDesktop(layout.desktopId||'');setPortrait(!!layout.portrait);setTransition(TRANSITION_LABELS[layout.transition?.style]?{style:layout.transition.style,durationMs:layout.transition.durationMs}:DEFAULT_TRANSITION);
     if(layout.microphoneId)initialDevices.current.microphone=true;
@@ -191,8 +195,9 @@ function App(){
     setLayers(list=>list.filter(item=>item.uid!==layer.uid));if(selected===layer.uid)setSelected(null);
   };
   // A new scene starts empty: two scenes never share what the other shows unless you duplicate it.
-  const addScene=(copyFrom=null)=>{const id='cena-'+uid();suggestedScenes.current.add(id);setScenes(list=>[...list,{id,name:copyFrom?'Cópia de '+copyFrom.name:'Cena '+(list.length+1),layers:(copyFrom?.layers||[]).map(layer=>withUid(persistLayer(layer)))}]);setActiveScene(id);setSelected(null);setAdding(false);setRenaming(null);};
-  const removeScene=item=>{if(scenes.length<2)return;setScenes(list=>list.filter(entry=>entry.id!==item.id));if(activeScene===item.id){setActiveScene(scenes.find(entry=>entry.id!==item.id).id);setSelected(null);setAdding(false);setRenaming(null);}};
+  const openScene=()=>{setSelected(null);setAdding(false);setSceneEdit(true);};
+  const addScene=(copyFrom=null)=>{const id='cena-'+uid();suggestedScenes.current.add(id);setSceneEdit(false);setScenes(list=>[...list,{id,name:copyFrom?'Cópia de '+copyFrom.name:'Cena '+(list.length+1),layers:(copyFrom?.layers||[]).map(layer=>withUid(persistLayer(layer)))}]);setActiveScene(id);setSelected(null);setAdding(false);};
+  const removeScene=item=>{if(scenes.length<2)return;setScenes(list=>list.filter(entry=>entry.id!==item.id));if(activeScene===item.id){setActiveScene(scenes.find(entry=>entry.id!==item.id).id);setSelected(null);setAdding(false);setSceneEdit(false);}};
   const selectedLayer=layers.find(layer=>layer.uid===selected)||null;
   const layerReady=index=>state.prepared&&state.mediaStatus?.layers?.[index]?.ready;
   // The capture stopped delivering (alt-tab, minimized window, game closed) and the last frame is held.
@@ -228,15 +233,12 @@ function App(){
       {session&&!owned&&<p className="warning">Há uma live em outro dispositivo. Gerencie pelo site antes de iniciar aqui.</p>}
       <div className="docks">
         <section className="dock dock-scenes" aria-label="Cenas"><header><h3><Film size={14}/> Cenas</h3><button className="icon-button" aria-label="Nova cena" title="Nova cena, sem fontes" disabled={scenes.length>=12} onClick={()=>addScene()}><Plus size={15}/></button></header>
-          <ul className="scene-list">{scenes.map(item=><li key={item.id} className={item.id===scene?.id?'is-active':''}>{renaming===item.id?<input autoFocus aria-label="Nome da cena" maxLength={40} defaultValue={item.name} onBlur={e=>{patchScene(item.id,()=>({name:e.target.value.trim()||item.name}));setRenaming(null);}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();if(e.key==='Escape'){e.currentTarget.value=item.name;e.currentTarget.blur();}}}/>:<button className="scene-button" onClick={()=>{setActiveScene(item.id);setSelected(null);}} onDoubleClick={()=>setRenaming(item.id)}>{item.name}</button>}{item.id===scene?.id&&renaming!==item.id&&<><button className="icon-button" aria-label="Renomear cena" onClick={()=>setRenaming(item.id)}><Pencil size={13}/></button><button className="icon-button" aria-label="Duplicar cena" title="Duplicar esta cena" disabled={scenes.length>=12} onClick={()=>addScene(item)}><Copy size={13}/></button><button className="icon-button" aria-label="Remover cena" disabled={scenes.length<2} onClick={()=>removeScene(item)}><Trash2 size={13}/></button></>}</li>)}</ul>
-          <div className="scene-transition">
-            <label><span>Troca</span><select aria-label="Transição entre cenas" value={transition.style} onChange={e=>setTransition(current=>({...current,style:e.target.value}))}>{Object.entries(TRANSITION_LABELS).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
-            {transition.style!=='cut'&&<label><span>Tempo</span><select aria-label="Duração da transição" value={transition.durationMs} onChange={e=>setTransition(current=>({...current,durationMs:Number(e.target.value)}))}><option value={200}>Rápida</option><option value={350}>Média</option><option value={600}>Suave</option></select></label>}
-          </div>
-          <p className="dock-hint">Clique para trocar, inclusive ao vivo. Cada cena tem suas próprias fontes e entra com a animação escolhida. A pausa cobre qualquer cena.</p>{layoutSave.error?<div className="dock-hint" role="alert">Não foi possível salvar as cenas: {layoutSave.error}<button className="text-button" onClick={layoutSave.retry}>Tentar salvar novamente</button></div>:layoutSave.pending&&<p role="status" className="dock-hint">Salvando alterações…</p>}
+          <ul className="scene-list">{scenes.map(item=><li key={item.id} className={item.id===scene?.id?'is-active':''}><button className="scene-button" onClick={()=>{setActiveScene(item.id);setSelected(null);}} onDoubleClick={()=>{setActiveScene(item.id);openScene();}}>{item.name}</button>{item.id===scene?.id&&<button className="icon-button" aria-label="Editar cena" title="Nome, troca de cena, duplicar e remover" onClick={openScene}><Pencil size={13}/></button>}</li>)}</ul>
+          <p className="dock-hint">Clique para trocar, inclusive ao vivo. Cada cena tem suas próprias fontes. O lápis abre o nome, a troca de cena e as cópias.</p>{layoutSave.error?<div className="dock-hint" role="alert">Não foi possível salvar as cenas: {layoutSave.error}<button className="text-button" onClick={layoutSave.retry}>Tentar salvar novamente</button></div>:layoutSave.pending&&<p role="status" className="dock-hint">Salvando alterações…</p>}
         </section>
         <section className="dock dock-sources" aria-label="Fontes"><header><h3><Layers size={14}/> Fontes</h3><div className="dock-actions"><button className="icon-button" aria-label={devices?'Atualizar equipamentos':'Buscar equipamentos'} title={devices?'Atualizar lista de equipamentos':'Buscar equipamentos'} disabled={busy} onClick={enumerate}><RefreshCw size={14}/></button><button className="icon-button" aria-label="Adicionar fonte" aria-expanded={adding} disabled={busy||layers.length>=6} onClick={()=>setAdding(value=>!value)}><Plus size={15}/></button></div></header>
-          {adding&&<div className="add-panel">{['camera','window','display','game','image','text'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" onClick={()=>addLayer(kind)}><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>}
+          {adding&&<p className="dock-hint">{GAME_HINT}</p>}
+          {adding&&<div className="add-panel">{['camera','window','display','image','text'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" onClick={()=>addLayer(kind)}><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>}
           {layers.length?<ul className="layer-list">{layers.map((layer,index)=>{const Icon=KIND_ICONS[layer.kind],missing=layerMissing(layer);return <li key={layer.uid} className={(layer.uid===selected?'is-selected':'')+(layer.visible===false?' is-hidden':'')}>
             <button className="layer-main" onClick={()=>setSelected(layer.uid===selected?null:layer.uid)}><Icon size={14}/><span className="layer-name">{layerLabel(layer)}</span>{missing?<span className="layer-flag is-missing">desconectado</span>:state.prepared&&inSync&&layer.visible!==false&&layerHolding(index)?<span className="layer-flag" title="A captura parou de enviar imagem; o último quadro continua no ar.">quadro congelado</span>:state.prepared&&inSync&&layer.visible!==false&&layerReady(index)===false?<span className="layer-flag">{layer.kind==='game'?'aguardando o jogo':'sem sinal'}</span>:null}</button>
             <button className="icon-button" aria-label={layer.visible===false?'Mostrar fonte':'Ocultar fonte'} aria-pressed={layer.visible!==false} onClick={()=>toggleLayer(layer)}>{layer.visible===false?<EyeOff size={14}/>:<Eye size={14}/>}</button>
@@ -256,6 +258,16 @@ function App(){
           </div>
           {desktop&&<p className="dock-hint">O áudio do computador inclui outros apps e notificações. Use fones e silencie o player da sua própria live para evitar eco.</p>}
         </section>
+      {sceneEdit&&scene&&<><div className="sheet-backdrop" onClick={()=>setSceneEdit(false)}/><div className="layer-dialog" role="dialog" aria-modal="true" aria-label="Ajustes da cena" onKeyDown={e=>{if(e.key==='Escape')setSceneEdit(false);}}>
+        <header><h3><Film size={15}/> {scene.name}</h3><span className="dock-hint">as mudanças valem na hora</span><button className="icon-button" aria-label="Fechar ajustes da cena" onClick={()=>setSceneEdit(false)}><X size={16}/></button></header>
+        <div className="layer-props">
+          <label>Nome<input autoFocus aria-label="Nome da cena" maxLength={40} value={scene.name} onChange={e=>patchScene(scene.id,()=>({name:e.target.value}))} onBlur={e=>{if(!e.target.value.trim())patchScene(scene.id,item=>({name:'Cena '+(scenes.indexOf(item)+1)}));}}/></label>
+          <label>Troca de cena<select aria-label="Transição entre cenas" value={transition.style} onChange={e=>setTransition(current=>({...current,style:e.target.value}))}>{Object.entries(TRANSITION_LABELS).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+          {transition.style!=='cut'&&<label>Tempo da troca<select aria-label="Duração da transição" value={transition.durationMs} onChange={e=>setTransition(current=>({...current,durationMs:Number(e.target.value)}))}><option value={200}>Rápida</option><option value={350}>Média</option><option value={600}>Suave</option></select></label>}
+          <p className="fine">A animação vale para a entrada de qualquer cena. Durante a pausa a troca acontece atrás do aviso, sem aparecer.</p>
+        </div>
+        <footer><button className="secondary" disabled={scenes.length>=12} onClick={()=>addScene(scene)}><Copy size={14}/> Duplicar</button><button className="secondary" disabled={scenes.length<2} onClick={()=>{removeScene(scene);setSceneEdit(false);}}><Trash2 size={14}/> Remover cena</button><button className="primary" onClick={()=>setSceneEdit(false)}><Check size={15}/> Concluir</button></footer>
+      </div></>}
       {selectedLayer&&(()=>{const Icon=KIND_ICONS[selectedLayer.kind];return <><div className="sheet-backdrop" onClick={()=>setSelected(null)}/><div className="layer-dialog" role="dialog" aria-modal="true" aria-label="Ajustes da fonte" onKeyDown={e=>{if(e.key==='Escape')setSelected(null);}}>
         <header><h3><Icon size={15}/> {layerLabel(selectedLayer)}</h3><span className="dock-hint">{KIND_LABELS[selectedLayer.kind]} · as mudanças valem na hora</span><button className="icon-button" aria-label="Fechar ajustes" onClick={()=>setSelected(null)}><X size={16}/></button></header>
         <div className="layer-props">
@@ -266,8 +278,8 @@ function App(){
             <label>Posição<select aria-label="Posição da fonte" value={selectedLayer.fit||'fit'} onChange={e=>patchLayer(selectedLayer.uid,{fit:e.target.value})}><option value="fit">Tela inteira, imagem completa</option><option value="fill">Preencher, cortando as bordas</option><option value="corner">Em um canto (sobre as outras)</option></select></label>
             {selectedLayer.fit==='corner'&&<div className="corner-row"><div className="corner-grid" role="group" aria-label="Canto">{[['tl','Canto superior esquerdo'],['tr','Canto superior direito'],['bl','Canto inferior esquerdo'],['br','Canto inferior direito']].map(([corner,label])=><button key={corner} aria-label={label} aria-pressed={selectedLayer.corner===corner} className={selectedLayer.corner===corner?'is-active':''} onClick={()=>patchLayer(selectedLayer.uid,{corner})}/>)}</div><label className="size-field">Tamanho <strong>{Math.round((selectedLayer.size||.3)*100)}%</strong><input aria-label="Tamanho da fonte no canto" type="range" min="15" max="60" step="5" value={Math.round((selectedLayer.size||.3)*100)} onChange={e=>patchLayer(selectedLayer.uid,{size:Number(e.target.value)/100})}/></label></div>}
             {selectedLayer.kind==='display'&&<p className="fine">Tudo nessa tela pode aparecer, inclusive este gerenciador. Prefira compartilhar uma janela.</p>}
-            {selectedLayer.kind==='game'&&<p className="fine">Captura o jogo por dentro (DirectX, OpenGL ou Vulkan), em janela ou tela cheia. Com "Qualquer jogo em tela cheia" a imagem aparece quando o jogo abrir em tela cheia. Se o anticheat do jogo bloquear o hook, use Tela inteira.</p>}
-            {selectedLayer.kind==='window'&&<p className="fine">Para jogos, prefira a fonte Jogo: a captura de janela pode ficar preta em programas que desenham na placa de vídeo.</p>}
+            {selectedLayer.kind==='game'&&<p className="fine">Fonte antiga de captura por dentro do jogo, mantida para as cenas que já a usavam. Para uma cena nova use Janela / Jogo.</p>}
+            {selectedLayer.kind==='window'&&<p className="fine">{GAME_HINT} Se a janela do jogo parar de enviar imagem, o último quadro fica no ar.</p>}
         </div>
         <footer><button className="secondary" onClick={()=>{removeLayer(selectedLayer);}}><Trash2 size={14}/> Remover fonte</button><button className="primary" autoFocus onClick={()=>setSelected(null)}><Check size={15}/> Concluir</button></footer>
       </div></>;})()}

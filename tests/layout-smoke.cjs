@@ -100,18 +100,38 @@ app.whenReady().then(async()=>{let win;try{
  await delay(600);assert.equal(last('layout.save').payload.scenes.length,2);assert.equal(last('layout.save').payload.scenes[1].layers.length,0,'A new scene starts empty: two scenes never share what the other shows');
  assert.ok(last('prepare').payload.sceneId,'The scene identity reaches the engine so it can animate the change');
  assert.deepEqual(last('prepare').payload.transition,{style:'slide',durationMs:350},'The scene change carries the chosen animation');
- await clickText('.scene-button','Principal');await delay(300);await click('[aria-label="Duplicar cena"]');await delay(700);
+ await clickText('.scene-button','Principal');await delay(300);await click('[aria-label="Editar cena"]');await delay(150);
+ assert.equal(await js("!!document.querySelector('[aria-label=\"Ajustes da cena\"]')"),true,'The pencil opens the scene settings, where the animation lives');
+ assert.equal(await js("document.querySelectorAll('.scene-transition').length"),0,'The scene dock no longer spends height on the animation controls');
+ await clickText('[aria-label="Ajustes da cena"] button','Duplicar');await delay(700);
  const copied=last('layout.save').payload;assert.equal(copied.scenes.length,3);assert.equal(copied.scenes[2].layers.length,3,'Duplicating copies the sources of that scene, on purpose');
+ await click('[aria-label="Editar cena"]');await delay(150);
  await setValue('[aria-label="Transição entre cenas"]','fade');await delay(600);
  assert.equal(last('prepare').payload.transition.style,'fade','Choosing another animation is applied to the engine');
  await setValue('[aria-label="Transição entre cenas"]','slide');await delay(600);
+ await clickText('[aria-label="Ajustes da cena"] button','Concluir');await delay(150);
+ assert.equal(await js("!!document.querySelector('[aria-label=\"Ajustes da cena\"]')"),false);
+ // A game is captured through the window source; the separate game source is no longer offered.
+ await click('[aria-label="Adicionar fonte"]');await delay(120);
+ const offered=await js("[...document.querySelectorAll('.add-panel button')].map(b=>b.textContent.trim())");
+ assert.deepEqual(offered,['Câmera','Janela / Jogo','Tela inteira','Imagem','Texto'],'One source covers window and game');
+ assert.equal(await js("document.querySelector('.dock-sources .dock-hint').textContent.includes('modo janela')"),true,'Adding a source explains how a game must run');
+ await click('[aria-label="Adicionar fonte"]');await delay(120);
  await clickText('.scene-button','Principal');await delay(600);assert.equal(await js("document.querySelector('.scene-list li.is-active').textContent.includes('Principal')"),true);
  await js("[...document.querySelectorAll('[role=tab]')].find(b=>b.textContent.includes('Interações')).click()");await delay(400);
  const layouts=[];
  for(const [width,height,zoom]of[[1000,720,1],[1280,800,1],[1440,940,1.25],[1920,1080,1.5]]){
   win.setContentSize(width,height);win.webContents.setZoomFactor(zoom);await delay(250);
-  const layout=await js(`(()=>{const manager=document.querySelector('.manager-content'),boxes=[...manager.querySelectorAll('input[type=checkbox]')].map(e=>{const r=e.getBoundingClientRect();return{width:r.width,height:r.height}}),fields=[...manager.querySelectorAll('input:not([type=checkbox])')].map(e=>e.getBoundingClientRect().width),bar=document.querySelector('.controlbar').getBoundingClientRect(),production=document.querySelector('.production'),preview=document.querySelector('.preview').getBoundingClientRect();return{overflow:document.documentElement.scrollWidth>innerWidth,managerOverflow:manager.scrollWidth>manager.clientWidth+1,productionScrolls:production.scrollHeight>production.clientHeight+1,boxes,fields,footerVisible:bar.bottom<=innerHeight+1,preview:preview.toJSON(),ratio:preview.width/preview.height,docksVisible:document.querySelector('.docks').getBoundingClientRect().bottom<=bar.top+1}})()`);
+  const layout=await js(`(()=>{const manager=document.querySelector('.manager-content'),boxes=[...manager.querySelectorAll('input[type=checkbox]')].map(e=>{const r=e.getBoundingClientRect();return{width:r.width,height:r.height}}),fields=[...manager.querySelectorAll('input:not([type=checkbox])')].map(e=>e.getBoundingClientRect().width),bar=document.querySelector('.controlbar').getBoundingClientRect(),production=document.querySelector('.production'),preview=document.querySelector('.preview').getBoundingClientRect();return{overflow:document.documentElement.scrollWidth>innerWidth,managerOverflow:manager.scrollWidth>manager.clientWidth+1,productionScrolls:production.scrollHeight>production.clientHeight+1,boxes,fields,footerVisible:bar.bottom<=innerHeight+1,preview:preview.toJSON(),ratio:preview.width/preview.height,docksVisible:document.querySelector('.docks').getBoundingClientRect().bottom<=bar.top+1,
+   insideShell:(()=>{const shell=document.querySelector('.preview-shell').getBoundingClientRect();return preview.top>=shell.top-.5&&preview.bottom<=shell.bottom+.5&&preview.left>=shell.left-.5&&preview.right<=shell.right+.5})(),
+   aboveCaption:preview.bottom<=document.querySelector('.preview-caption').getBoundingClientRect().top+.5,
+   belowTopbar:preview.top>=document.querySelector('.topbar').getBoundingClientRect().bottom-.5}})()`);
   assert.equal(layout.overflow,false);assert.equal(layout.managerOverflow,false);assert.equal(layout.footerVisible,true);assert.equal(layout.productionScrolls,false,'Preview, docks and controls fit without scrolling at '+width+'x'+height);assert.equal(layout.docksVisible,true);assert.ok(Math.abs(layout.ratio-16/9)<.02,'Landscape preview keeps the 16:9 canvas ratio');assert.ok(layout.preview.height>=150);
+  // The native child window is placed exactly on this box, so the box itself must stay contained.
+  assert.equal(layout.insideShell,true,'The preview box stays inside its frame at '+width+'x'+height+' zoom '+zoom);
+  assert.equal(layout.aboveCaption,true,'The preview box never covers the caption at '+width+'x'+height+' zoom '+zoom);
+  assert.equal(layout.belowTopbar,true,'The preview box never reaches the top bar at '+width+'x'+height+' zoom '+zoom);
+  assert.ok(last('bounds').payload.ratio>=.5,'The page reports the pixel ratio its layout used');
   assert.ok(layout.boxes.length>=2);assert.ok(layout.boxes.every(b=>b.width>=14&&b.width<=18&&b.height>=14&&b.height<=18));assert.ok(layout.fields.every(w=>w>=150),'Manager fields must not compress into narrow columns');
   await click('.layer-list li:first-child .layer-main');await delay(150);
   const editor=await js("(()=>{const p=document.querySelector('.preview').getBoundingClientRect(),d=document.querySelector('.layer-dialog').getBoundingClientRect(),b=document.querySelector('.sheet-backdrop').getBoundingClientRect(),dock=document.querySelector('.docks').getBoundingClientRect();return {previewBottom:p.bottom,dialogTop:d.top,dialogBottom:d.bottom,dockTop:dock.top,dockBottom:dock.bottom,backdropTop:b.top}})()");
