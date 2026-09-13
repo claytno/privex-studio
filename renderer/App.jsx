@@ -52,7 +52,7 @@ function previewBounds(element){
   }
   const style=getComputedStyle(element),number=value=>Number.parseFloat(value)||0;
   const left=number(style.borderLeftWidth)+number(style.paddingLeft),right=number(style.borderRightWidth)+number(style.paddingRight),top=number(style.borderTopWidth)+number(style.paddingTop),bottom=number(style.borderBottomWidth)+number(style.paddingBottom);
-  return{x:rect.x+left,y:rect.y+top,width:Math.max(0,rect.width-left-right),height:Math.max(0,rect.height-top-bottom),viewport:{width:innerWidth,height:innerHeight}};
+  return{x:rect.x+left,y:rect.y+top,width:Math.max(0,rect.width-left-right),height:Math.max(0,rect.height-top-bottom)};
 }
 function UpdateBanner({info,blocked,run}){
   if(!info?.available&&info?.status!=='error')return null;
@@ -64,7 +64,7 @@ function UpdatePreferences({state,busy,run}){
 }
 function App(){
   const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false);
-  const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[syncState,setSyncState]=useState({applying:false,appliedKey:'',failedKey:'',error:'',retrying:false});
+  const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[syncState,setSyncState]=useState({applying:false,appliedKey:'',failedKey:'',error:'',retrying:false}),[previewError,setPreviewError]=useState('');
   const [sourceNotice,setSourceNotice]=useState('');
   const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),initialScene=useRef(''),autoOpened=useRef(false),suggestedScenes=useRef(new Set()),editScope=useRef({}),accountScope=useRef(null),rate=useRef({bytes:0,at:0,kbps:0});
   const synchronizer=useMemo(()=>createSceneSync({prepare:payload=>invoke('prepare',payload),onState:setSyncState}),[]);
@@ -76,7 +76,7 @@ function App(){
   useLayoutEffect(()=>{
     if(!state.prepared||!preview.current)return;
     let timer,disposed=false,pending=Promise.resolve(),revision=0,lastGeometry='';
-    const send=bounds=>{const version=++revision;pending=pending.catch(()=>{}).then(()=>{if(disposed||version!==revision)return;return invoke('bounds',bounds);}).catch(()=>{});};
+    const send=bounds=>{const version=++revision;pending=pending.catch(()=>{}).then(()=>{if(disposed||version!==revision)return;return invoke('bounds',bounds);}).then(()=>{if(!disposed&&bounds.width)setPreviewError('');}).catch(e=>{if(!disposed&&bounds.width)setPreviewError('A prévia não pôde ser posicionada: '+(e?.message||'erro desconhecido'));});};
     const resize=()=>{const bounds=previewBounds(preview.current),geometry=JSON.stringify(bounds);if(geometry===lastGeometry)return;lastGeometry=geometry;clearTimeout(timer);send(hiddenBounds);if(bounds.width)timer=setTimeout(()=>{if(!disposed)send(previewBounds(preview.current));},70);};
     const observer=new ResizeObserver(resize);observer.observe(preview.current);observer.observe(document.documentElement);
     const mutation=new MutationObserver(resize);mutation.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['role','aria-hidden','open','data-state','class','style']});
@@ -197,7 +197,7 @@ function App(){
         <button className={muted?'muted-button':'secondary'} disabled={!state.prepared||busy} onClick={async()=>{const result=await run('mute',{muted:!muted});if(result!==undefined)setMuted(!muted);}}>{muted?<VolumeX size={15}/>:<Mic size={15}/>} {muted?'Mic silenciado':'Silenciar mic'}</button>
         <label className="fine check"><input type="checkbox" checked={!!state.overlayEnabled} disabled={!owned||busy} onChange={e=>run('overlay',{enabled:e.target.checked})}/> Meta no vídeo</label>
       </div>
-      {(error||syncState.error||state.error)&&<p role="alert" className="error">{error||syncState.error||state.error}</p>}{syncState.failedKey===composition&&<button className="secondary" disabled={busy||!canApply} onClick={apply}><RefreshCw size={14}/> Tentar aplicar cena novamente</button>}{state.notice&&!error&&!syncState.error&&<p role="status" className="notice">{state.notice}</p>}
+      {(error||syncState.error||state.error)&&<p role="alert" className="error">{error||syncState.error||state.error}</p>}{state.prepared&&previewError&&<p role="alert" className="error">{previewError}</p>}{syncState.failedKey===composition&&<button className="secondary" disabled={busy||!canApply} onClick={apply}><RefreshCw size={14}/> Tentar aplicar cena novamente</button>}{state.notice&&!error&&!syncState.error&&<p role="status" className="notice">{state.notice}</p>}
       {sourceNotice&&<p role="status" className="notice">{sourceNotice}</p>}
       {deviceError&&<p className="warning" role="status">Não foi possível atualizar os equipamentos: {deviceError}</p>}{(missingLayers.length>0||missingMic||missingDesktop)&&<p className="warning" role="status">Um equipamento selecionado foi desconectado. Reconecte ou escolha outro. A captura não troca para outro dispositivo automaticamente.</p>}
       {session&&!owned&&<p className="warning">Há uma live em outro dispositivo. Gerencie pelo site antes de iniciar aqui.</p>}

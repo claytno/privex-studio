@@ -19,17 +19,15 @@ test('prelive commerce requires confirmed account but never reserves or opens ca
  await assert.rejects(subject.command('manager',{method:'GET',path:'/lives/'+ID+'/commerce'}),/sessão/);
  subject.configure({user:null});await assert.rejects(subject.command('manager',{method:'GET',path:'/lives/commerce-preset'}),/Confirme/);
 });
-test('preview coordinates use CSS viewport without applying guessed monitor scaling twice',async()=>{
+test('preview bounds are converted to physical pixels once and hidden when outside the window',async()=>{
  const {subject,engineCalls}=fixture();
- subject.configure({win:{isDestroyed:()=>false,getContentSize:()=>[1440,800],webContents:{send(){},getZoomFactor:()=>1.25}}});
- const rect={x:20.2,y:80.4,width:500.3,height:281.4,viewport:{width:1152,height:640}};
- await subject.command('bounds',rect);
- assert.equal(JSON.stringify(engineCalls.find(c=>c.name==='resize').data.bounds),JSON.stringify(rect));
- await subject.command('bounds',{x:0,y:0,width:0,height:0});assert.equal(engineCalls.at(-1).data.visible,false);
- await assert.rejects(subject.command('bounds',{...rect,viewport:{width:100,height:100}}),/mudou/);
- assert.equal(engineCalls.at(-1).data.visible,false,'Invalid viewport must hide the old native child');
-});
-test('empty scene reconfigures existing preview instead of retaining deleted camera',async()=>{
+ subject.configure({win:{isDestroyed:()=>false,getNativeWindowHandle:()=>Buffer.alloc(8),webContents:{send(){},getZoomFactor:()=>1.25},getContentSize:()=>[1440,940],getBounds:()=>({x:0,y:0,width:1440,height:940})}});
+ await subject.command('bounds',{x:20.2,y:80.4,width:500.3,height:281.4});
+ const resize=engineCalls.find(c=>c.name==='resize');assert.equal(JSON.stringify(resize.data.bounds),JSON.stringify({x:25,y:101,width:625,height:352}),'zoom and display scale apply exactly once');
+ assert.equal(engineCalls.at(-1).name,'preview');assert.equal(engineCalls.at(-1).data.visible,true);
+ await assert.rejects(subject.command('bounds',{x:1400,y:80,width:500,height:281}),/fora da janela/);
+ await subject.command('bounds',{x:0,y:0,width:0,height:0});assert.equal(engineCalls.at(-1).data.visible,false,'zero bounds hide the native child');
+});test('empty scene reconfigures existing preview instead of retaining deleted camera',async()=>{
  const {subject,engineCalls}=fixture();await subject.command('prepare',equipment);
  await subject.command('prepare',{layers:[],portrait:true,microphoneId:'explicit-mic'});
  assert.equal(engineCalls.filter(c=>c.name==='reconfigure').at(-1).data.layers.length,0);
@@ -56,6 +54,7 @@ function fixture(overrides={}) {
     app: { enableSandbox() {}, requestSingleInstanceLock: () => true, on() {}, setPath() {}, getPath: () => 'C:/synthetic-no-files',
       isPackaged:true, whenReady: () => new Promise(() => {}), getVersion: () => '0.2.0-beta.3', quit() { overrides.onQuit?.(); } },
     protocol: { registerSchemesAsPrivileged() {} },
+    screen: { getDisplayMatching: () => ({ scaleFactor: 1 }) },
     shell: { openExternal: async () => {} },
   };
   const context = {

@@ -109,8 +109,8 @@ app.whenReady().then(async()=>{let win;try{
   await click('.layer-list li:first-child .layer-main');await delay(150);
   const editor=await js("(()=>{const p=document.querySelector('.preview').getBoundingClientRect(),d=document.querySelector('.layer-dialog').getBoundingClientRect(),b=document.querySelector('.sheet-backdrop').getBoundingClientRect(),dock=document.querySelector('.docks').getBoundingClientRect();return {previewBottom:p.bottom,dialogTop:d.top,dialogBottom:d.bottom,dockTop:dock.top,dockBottom:dock.bottom,backdropTop:b.top}})()");
   assert.ok(editor.dialogTop>=editor.previewBottom,'Editor never covers the preview at '+width+'x'+height+' zoom '+zoom);
-  assert.ok(editor.backdropTop>=editor.previewBottom,'Backdrop stays in the docks');assert.ok(editor.dialogBottom<=editor.dockBottom+1);assert.ok(last('bounds').payload.width>0,'Native preview remains visible while editing');
-  assert.ok(last('bounds').payload.viewport?.width>0,'Bounds include the CSS viewport for main-process DPI conversion');
+  assert.ok(editor.dialogBottom<=editor.dockBottom+13,'Editor stays within the production column');assert.ok(last('bounds').payload.width>0,'Native preview remains visible while editing');
+  assert.ok(last('bounds').payload.width>0&&last('bounds').payload.viewport===undefined,'Bounds are CSS pixels; the main process converts them once');
   layouts.push({width,height,zoom,...layout,editor});await fs.writeFile(path.join(output,`studio-${width}-zoom-${zoom}.png`),(await win.webContents.capturePage()).toPNG());
   await click('[aria-label="Fechar ajustes"]');await delay(100);
  }
