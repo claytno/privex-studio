@@ -1,5 +1,10 @@
 export const liveMoney = cents => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format((Number(cents) || 0) / 100);
 export const liveKinds = { tip: 'Gorjeta', gift: 'Presente', action: 'Ação paga', wheel: 'Roleta' };
+export function liveVisibleKinds(data) {
+  return Object.entries({ tip: 'tips_enabled', gift: 'gifts_enabled', action: 'actions_enabled', wheel: 'wheel_enabled' })
+    .filter(([kind, flag]) => data?.controls?.[flag] && (kind === 'tip' || data?.items?.some(item => item.kind === kind && item.active)))
+    .map(([kind]) => kind);
+}
 export function parseLiveCents(value) {
   const text = String(value).trim();
   if (!/^\d{1,7}(?:[,.]\d{1,2})?$/.test(text)) return null;

@@ -6,10 +6,12 @@
     "shared/components/ui/Modal.jsx",
     "shared/hooks/useLivePolling.js",
     "shared/hooks/useLiveRoomEvents.js",
+    "shared/pages/live/LiveAudiencePanel.jsx",
     "shared/pages/live/LiveChatPanel.jsx",
     "shared/pages/live/LiveCommerceStudio.jsx",
     "shared/pages/live/LiveModerationPanel.jsx",
     "shared/pages/live/LiveOrdersPanel.jsx",
+    "shared/pages/live/liveAudienceUtils.js",
     "shared/pages/live/liveCommerceUtils.js"
   ],
   "dependencies": [

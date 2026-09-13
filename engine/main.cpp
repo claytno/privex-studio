@@ -2,7 +2,9 @@
 #include <objbase.h>
 #include <tlhelp32.h>
 #include <obs.h>
+#include <obs-audio-controls.h>
 #include <util/base.h>
+#include <util/platform.h>
 #include <QCoreApplication>
 #include <QDir>
 #include <QJsonArray>
@@ -59,11 +61,59 @@ DWORD parentProcessId() {
  CloseHandle(snapshot); return parent;
 }
 
+// The audio callback retains numbers only; raw audio never crosses the native process.
+struct AudioMeter {
+ obs_volmeter_t *handle=nullptr;
+ std::mutex mutex;
+ float inputDb=-60,outputDb=-60;
+ ULONGLONG attachedAt=0,lastData=0,windowAt=0,inputClipUntil=0,outputClipUntil=0;
+ static float boundedDb(float db){return std::isfinite(db)?std::clamp(db,-60.0f,0.0f):db>0?0.0f:-60.0f;}
+ static void levels(void *context,const float *,const float peak[MAX_AUDIO_CHANNELS],const float inputPeak[MAX_AUDIO_CHANNELS]){
+  auto *meter=static_cast<AudioMeter *>(context);const auto now=GetTickCount64();
+  float input=-60,output=-60;bool inputClip=false,outputClip=false;
+  for(size_t i=0;i<MAX_AUDIO_CHANNELS;i++){
+   input=std::max(input,boundedDb(inputPeak[i]));output=std::max(output,boundedDb(peak[i]));
+   inputClip=inputClip||(std::isfinite(inputPeak[i])&&inputPeak[i]>=0);outputClip=outputClip||(std::isfinite(peak[i])&&peak[i]>=0);
+  }
+  std::lock_guard lock(meter->mutex);
+  if(now-meter->windowAt>=200){meter->inputDb=input;meter->outputDb=output;meter->windowAt=now;}
+  else{meter->inputDb=std::max(meter->inputDb,input);meter->outputDb=std::max(meter->outputDb,output);}
+  meter->lastData=now;if(inputClip)meter->inputClipUntil=now+1500;if(outputClip)meter->outputClipUntil=now+1500;
+ }
+ void detach(){
+  // Removing the callback waits on libobs' callback mutex before releasing our state.
+  if(handle){obs_volmeter_remove_callback(handle,levels,this);obs_volmeter_detach_source(handle);obs_volmeter_destroy(handle);handle=nullptr;}
+  std::lock_guard lock(mutex);inputDb=outputDb=-60;attachedAt=lastData=windowAt=inputClipUntil=outputClipUntil=0;
+ }
+ void attach(obs_source_t *source){
+  detach();if(!source)return;
+  handle=obs_volmeter_create(OBS_FADER_LOG);if(!handle)return;
+  obs_volmeter_set_peak_meter_type(handle,SAMPLE_PEAK_METER);
+  {std::lock_guard lock(mutex);attachedAt=GetTickCount64();}
+  obs_volmeter_add_callback(handle,levels,this);
+  if(!obs_volmeter_attach_source(handle,source))detach();
+ }
+ QJsonObject read(obs_source_t *source){
+  const auto now=GetTickCount64();std::lock_guard lock(mutex);
+  const bool configured=source!=nullptr,receiving=configured&&lastData&&now-lastData<1000;
+  // libobs meters retain the input indication while muted. Public output must not.
+  const bool muted=configured&&(obs_source_muted(source)||obs_source_get_volume(source)<=0);
+  const char *state=!configured?"unconfigured":!handle?"unavailable":receiving?"receiving":now-attachedAt<2000?"waiting":"unavailable";
+  return {{"configured",configured},{"receiving",receiving},{"muted",muted},{"state",state},
+   {"inputDb",receiving?inputDb:-60},{"outputDb",receiving&&!muted?outputDb:-60},
+   {"inputClipping",receiving&&inputClipUntil>now},{"outputClipping",receiving&&!muted&&outputClipUntil>now}};
+ }
+ ~AudioMeter(){detach();}
+};
+
 struct Engine {
  bool initialized = false, prepared = false, starting = false, paused = false, desiredMuted = false;
  int width = 1280, height = 720, fps = 30;
  obs_scene_t *scene = nullptr;
- obs_source_t *visual = nullptr, *mic = nullptr;
+ obs_source_t *visual = nullptr, *mic = nullptr, *desktop = nullptr;
+ QJsonObject captureConfig;
+ float micVolume = 1.0f, desktopVolume = 1.0f;
+ AudioMeter micMeter,desktopMeter;
  obs_sceneitem_t *visualItem = nullptr;
  std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> pauseSources, overlaySources;
  QJsonObject overlayConfig;
@@ -109,13 +159,16 @@ struct Engine {
   starting = false; connected = false;
  }
  void clearSources() {
+  micMeter.detach();desktopMeter.detach();
   if (display) { obs_display_remove_draw_callback(display, draw, this); obs_display_destroy(display); display = nullptr; }
   if (preview) { DestroyWindow(preview); preview = nullptr; } previewPositioned = false;
-  if (initialized) { obs_set_output_source(0, nullptr); obs_set_output_source(1, nullptr); }
+  if (initialized) { obs_set_output_source(0, nullptr); obs_set_output_source(1, nullptr); obs_set_output_source(2, nullptr); }
   clearLayer(overlaySources); clearLayer(pauseSources); overlayConfig = {}; visualItem = nullptr; paused = false;
   if (scene) { obs_scene_release(scene); scene = nullptr; }
   if (visual) { obs_source_release(visual); visual = nullptr; }
   if (mic) { obs_source_release(mic); mic = nullptr; }
+  if (desktop) { obs_source_release(desktop); desktop = nullptr; }
+  captureConfig = {};
   prepared = false;
  }
  void cleanup() { releaseOutput(); clearSources(); if (initialized) { obs_shutdown(); initialized = false; } }
@@ -185,6 +238,7 @@ struct Engine {
   paused = mode == "pause"; obs_sceneitem_set_visible(visualItem,!paused);
   for (auto [source,item] : pauseSources) obs_sceneitem_set_visible(item,paused);
   if (mic) obs_source_set_muted(mic,paused || desiredMuted);
+  if (desktop) obs_source_set_muted(desktop,paused);
   // Keep the verified public goal above the interval slate as well.
   for (auto [source,item] : overlaySources) obs_sceneitem_set_order(item,OBS_ORDER_MOVE_TOP);
  }
@@ -211,9 +265,71 @@ struct Engine {
    overlayConfig = next;
   } catch (...) { clearLayer(overlaySources); overlayConfig={}; throw; }
  }
- QJsonObject enumerate() { init(); return {{"cameras", list("dshow_input", "video_device_id")}, {"microphones", list("wasapi_input_capture", "device_id")}, {"displays", list("monitor_capture", "monitor_id")}, {"windows", list("window_capture", "window")}}; }
+ QJsonObject enumerate() { init(); return {{"cameras", list("dshow_input", "video_device_id")}, {"microphones", list("wasapi_input_capture", "device_id")}, {"desktops", list("wasapi_output_capture", "device_id")}, {"displays", list("monitor_capture", "monitor_id")}, {"windows", list("window_capture", "window")}}; }
+ void volume(const QJsonObject &args) {
+  auto channel = stringArg(args,"channel",16); double value = args.value("volume").toDouble(-1);
+  require((channel=="microphone" || channel=="desktop") && std::isfinite(value) && value>=0 && value<=100,"Invalid volume");
+  float &level = channel=="microphone" ? micVolume : desktopVolume; level=float(value/100.0);
+  auto *source = channel=="microphone" ? mic : desktop; if(source) obs_source_set_volume(source,level);
+ }
+ void replaceVisual(obs_source_t *next) {
+  struct Change {Engine *engine;obs_source_t *source;} change{this,next};
+  obs_scene_atomic_update(scene,[](void *data,obs_scene_t *){auto *change=static_cast<Change *>(data);change->engine->replaceVisualLocked(change->source);},&change);
+ }
+ void replaceVisualLocked(obs_source_t *next) {
+  // The caller owns next. Keep the current scene/output/encoder and interval/goal layers.
+  auto *nextItem=obs_scene_add(scene,next); require(nextItem,"Could not compose replacement video");
+  obs_sceneitem_set_visible(nextItem,false);
+  obs_sceneitem_defer_update_begin(nextItem);
+  vec2 bounds{float(width),float(height)}; obs_sceneitem_set_bounds_type(nextItem,OBS_BOUNDS_SCALE_INNER);
+  obs_sceneitem_set_bounds_alignment(nextItem,OBS_ALIGN_CENTER); obs_sceneitem_set_bounds_crop(nextItem,false);
+  obs_sceneitem_set_bounds(nextItem,&bounds); obs_sceneitem_set_alignment(nextItem,OBS_ALIGN_TOP|OBS_ALIGN_LEFT);
+  obs_sceneitem_defer_update_end(nextItem); obs_sceneitem_set_order(nextItem,OBS_ORDER_MOVE_BOTTOM);
+  auto *previous=visual; auto *previousItem=visualItem; visual=next; visualItem=nextItem;
+  obs_sceneitem_set_visible(nextItem,!paused); if(previousItem) obs_sceneitem_remove(previousItem); if(previous) obs_source_release(previous);
+ }
+ QJsonObject reconfigure(const QJsonObject &args) {
+  require(prepared && scene,"Prepare video before changing equipment");
+  require(args.value("width").toInt()==width && args.value("height").toInt()==height && args.value("fps").toInt()==fps,"End the stream before changing canvas format");
+  const auto kind=stringArg(args,"sourceType",16); const char *type=nullptr,*prop=nullptr; QString selected;
+  if(kind=="camera"){type="dshow_input";prop="video_device_id";selected=stringArg(args,"cameraId");}
+  else if(kind=="window"){type="window_capture";prop="window";selected=stringArg(args,"sourceId");}
+  else if(kind=="display"){type="monitor_capture";prop="monitor_id";selected=stringArg(args,"sourceId");}
+  else throw std::runtime_error("Unsupported source type");
+  require(!selected.isEmpty() && hasId(list(type,prop),selected),"Selected video device is unavailable; previous source preserved");
+  auto microphoneId=args.value("microphoneId").toString(),desktopId=args.value("desktopId").toString();
+  require(microphoneId.isEmpty() || hasId(list("wasapi_input_capture","device_id"),microphoneId),"Selected microphone is unavailable");
+  require(desktopId.isEmpty() || hasId(list("wasapi_output_capture","device_id"),desktopId),"Selected desktop audio is unavailable");
+  bool changeVideo=kind!=captureConfig.value("sourceType").toString() || selected!=captureConfig.value(kind=="camera"?"cameraId":"sourceId").toString();
+  bool changeMic=microphoneId!=captureConfig.value("microphoneId").toString(),changeDesktop=desktopId!=captureConfig.value("desktopId").toString();
+  obs_source_t *nextVideo=nullptr,*nextMic=nullptr,*nextDesktop=nullptr; bool showing=false;
+  auto createAudio=[](const char *sourceType,const char *name,const QString &id) {
+   if(id.isEmpty()) return static_cast<obs_source_t *>(nullptr);
+   auto *settings=obs_data_create();obs_data_set_string(settings,"device_id",id.toUtf8().constData());
+   auto *source=obs_source_create_private(sourceType,name,settings);obs_data_release(settings); require(source,"Audio capture creation failed");return source;
+  };
+  try {
+   if(changeMic) nextMic=createAudio("wasapi_input_capture","Privex microphone",microphoneId);
+   if(changeDesktop) nextDesktop=createAudio("wasapi_output_capture","Privex desktop audio",desktopId);
+   if(changeVideo){
+    auto *settings=obs_data_create();obs_data_set_string(settings,prop,selected.toUtf8().constData());
+    if(kind=="window"){obs_data_set_int(settings,"priority",1);obs_data_set_bool(settings,"capture_audio",false);}
+    nextVideo=obs_source_create_private(type,"Privex replacement video",settings);obs_data_release(settings);require(nextVideo,"Video capture creation failed");
+    obs_source_set_audio_mixers(nextVideo,0);obs_source_set_muted(nextVideo,true);
+    obs_source_inc_showing(nextVideo);showing=true;
+    for(int attempt=0;attempt<120 && (!obs_source_get_width(nextVideo)||!obs_source_get_height(nextVideo));attempt++) Sleep(25);
+    require(obs_source_get_width(nextVideo)>0 && obs_source_get_height(nextVideo)>0,"New video source is not ready; previous source preserved");
+    replaceVisual(nextVideo);obs_source_dec_showing(nextVideo);showing=false;nextVideo=nullptr;
+   }
+   if(changeMic){if(nextMic){obs_source_set_volume(nextMic,micVolume);obs_source_set_muted(nextMic,paused||desiredMuted);}micMeter.detach();obs_set_output_source(1,nextMic);if(mic)obs_source_release(mic);mic=nextMic;nextMic=nullptr;micMeter.attach(mic);}
+   if(changeDesktop){if(nextDesktop){obs_source_set_volume(nextDesktop,desktopVolume);obs_source_set_muted(nextDesktop,paused);}desktopMeter.detach();obs_set_output_source(2,nextDesktop);if(desktop)obs_source_release(desktop);desktop=nextDesktop;nextDesktop=nullptr;desktopMeter.attach(desktop);}
+   captureConfig=args;return status();
+  } catch(...){if(nextVideo){if(showing)obs_source_dec_showing(nextVideo);obs_source_release(nextVideo);}if(nextMic)obs_source_release(nextMic);if(nextDesktop)obs_source_release(nextDesktop);throw;}
+ }
  QJsonObject prepare(const QJsonObject &args) {
   require(!active(), "End the stream before changing capture"); init(); clearSources();
+  if(args.contains("microphoneVolume"))volume({{"channel","microphone"},{"volume",args.value("microphoneVolume")}});
+  if(args.contains("desktopVolume"))volume({{"channel","desktop"},{"volume",args.value("desktopVolume")}});
   width = args.value("width").toInt(1280); height = args.value("height").toInt(720); fps = args.value("fps").toInt(30);
   require((width == 1280 && height == 720) || (width == 720 && height == 1280) || (width == 1920 && height == 1080) || (width == 1080 && height == 1920), "Unsupported canvas size");
   require(fps == 30, "Pilot supports 30 fps"); resetVideo();
@@ -231,12 +347,20 @@ struct Engine {
   scene = obs_scene_create_private("Privex canvas"); require(scene, "Canvas creation failed"); fitVisual(); obs_set_output_source(0, obs_scene_get_source(scene));
   auto microphoneId = args.value("microphoneId").toString();
   if (!microphoneId.isEmpty()) {
-   require(microphoneId != "default" && hasId(list("wasapi_input_capture", "device_id"), microphoneId), "Select a specific available microphone");
+   require(hasId(list("wasapi_input_capture", "device_id"), microphoneId), "Selected microphone is unavailable");
    settings = obs_data_create(); obs_data_set_string(settings, "device_id", microphoneId.toUtf8().constData());
    mic = obs_source_create_private("wasapi_input_capture", "Privex microphone", settings); obs_data_release(settings); require(mic, "Microphone creation failed");
-   desiredMuted = args.value("muted").toBool(false); obs_source_set_muted(mic, desiredMuted); obs_set_output_source(1, mic);
+   desiredMuted = args.value("muted").toBool(false); obs_source_set_muted(mic, desiredMuted); obs_source_set_volume(mic,micVolume); obs_set_output_source(1, mic);
   }
-  attachPreview(args); prepared = true; return status();
+  auto desktopId=args.value("desktopId").toString();
+  if(!desktopId.isEmpty()){
+   require(hasId(list("wasapi_output_capture","device_id"),desktopId),"Selected desktop audio is unavailable");
+   settings=obs_data_create();obs_data_set_string(settings,"device_id",desktopId.toUtf8().constData());
+   desktop=obs_source_create_private("wasapi_output_capture","Privex desktop audio",settings);obs_data_release(settings);require(desktop,"Desktop audio creation failed");
+   obs_source_set_volume(desktop,desktopVolume);obs_set_output_source(2,desktop);
+  }
+  micMeter.attach(mic);desktopMeter.attach(desktop);
+  desiredMuted=args.value("muted").toBool(false);captureConfig=args;attachPreview(args); prepared = true; return status();
  }
  QJsonObject start(QJsonObject args) {
   require(prepared && visual && obs_source_get_width(visual) > 0 && obs_source_get_height(visual) > 0, "Wait for a working video source before starting"); require(!active(), "Stream is already starting or active"); releaseOutput();
@@ -261,6 +385,7 @@ struct Engine {
   const auto publish = publishState(connected.load(), output && obs_output_reconnecting(output), starting, prepared);
   return {{"prepared", prepared}, {"state", QString::fromLatin1(publish.name)}, {"streaming", publish.streaming}, {"width", width}, {"height", height}, {"fps", fps}, {"muted", !mic || obs_source_muted(mic)}, {"sceneMode",paused?"pause":"live"}, {"overlayVisible",!overlaySources.empty()}, {"sourceWidth", visual ? int(obs_source_get_width(visual)) : 0}, {"sourceHeight", visual ? int(obs_source_get_height(visual)) : 0}, {"totalBytes", output ? double(obs_output_get_total_bytes(output)) : 0}, {"droppedFrames", output ? obs_output_get_frames_dropped(output) : 0}, {"stopCode", stopCode == 999 ? QJsonValue() : QJsonValue(stopCode.load())}};
  }
+ QJsonObject audioLevels(){return {{"microphone",micMeter.read(mic)},{"desktop",desktopMeter.read(desktop)}};}
 };
 
 std::atomic<int> testFrames = 0, testFitFrames = 0, testStage = 0, testPauseFrames = 0, testOverlayFrames = 0;
@@ -274,6 +399,32 @@ void testFrame(void *, video_data *frame) {
  auto *fill = pixel(60,1249), *track = pixel(490,1249), *outside = pixel(600,1249);
  if (testStage == 2 && fill[2] > 150 && fill[1] < 100 && fill[0] > 130 && track[2] < 100 && track[0] < 100 && outside[0] < 20 && outside[1] < 20 && outside[2] < 20) testOverlayFrames++;
 }
+int testAudioMeters(){
+ require(AudioMeter::boundedDb(-INFINITY)==-60 && AudioMeter::boundedDb(NAN)==-60 && AudioMeter::boundedDb(12)==0 && AudioMeter::boundedDb(-12)==-12,"Meter numerical bounds failed");
+ obs_source_info info{};info.id="privex_synthetic_audio_meter";info.type=OBS_SOURCE_TYPE_INPUT;info.output_flags=OBS_SOURCE_AUDIO;
+ info.get_name=[](void *){return "Synthetic meter source";};info.create=[](obs_data_t *,obs_source_t *source)->void *{return source;};info.destroy=[](void *){};
+ obs_register_source(&info);auto *source=obs_source_create_private(info.id,"Synthetic audio meter",nullptr);require(source,"Synthetic audio source unavailable");
+ AudioMeter meter;meter.attach(source);require(meter.read(source).value("state").toString()=="waiting","New meter must wait for actual samples");
+ auto feed=[&](float amplitude){
+  alignas(16) float left[480],right[480];std::fill_n(left,480,amplitude);std::fill_n(right,480,amplitude);
+  obs_source_audio audio{};audio.data[0]=reinterpret_cast<uint8_t *>(left);audio.data[1]=reinterpret_cast<uint8_t *>(right);
+  audio.frames=480;audio.speakers=SPEAKERS_STEREO;audio.format=AUDIO_FORMAT_FLOAT_PLANAR;audio.samples_per_sec=48000;audio.timestamp=os_gettime_ns();
+  obs_source_output_audio(source,&audio);
+ };
+ obs_source_set_volume(source,.5f);feed(.5f);auto level=meter.read(source);
+ require(level.value("receiving").toBool() && std::abs(level.value("inputDb").toDouble()+6.0206)<.05 && std::abs(level.value("outputDb").toDouble()+12.0412)<.05,"Real volmeter input and postgain values differ from expected dBFS");
+ obs_source_set_muted(source,true);feed(.5f);level=meter.read(source);
+ require(level.value("inputDb").toDouble()>-7 && level.value("outputDb").toDouble()==-60 && level.value("muted").toBool(),"Mute must preserve input test but silence output meter");
+ obs_source_set_muted(source,false);obs_source_set_volume(source,1);feed(1);level=meter.read(source);
+ require(level.value("inputClipping").toBool() && level.value("outputClipping").toBool(),"Full scale must hold clipping indication");
+ // The peak meter includes the previous buffer boundary. Flush that tail and its hold.
+ feed(0);Sleep(220);feed(0);level=meter.read(source);
+ require(level.value("receiving").toBool() && level.value("inputDb").toDouble()==-60 && level.value("outputDb").toDouble()==-60,"Actual silence must remain distinct from missing callbacks");
+ Sleep(1050);level=meter.read(source);require(!level.value("receiving").toBool() && level.value("inputDb").toDouble()==-60,"Stale samples must not retain a false signal");
+ std::atomic<bool> feeding=true;std::thread producer([&]{while(feeding){feed(.25f);Sleep(1);}});
+ for(int i=0;i<20;i++){meter.detach();meter.attach(source);Sleep(2);}feeding=false;producer.join();
+ meter.detach();require(meter.read(nullptr).value("state").toString()=="unconfigured","Detached meter must clear old device state");obs_source_release(source);return 8;
+}
 int selfTest(Engine &e) {
  const auto beforeDisconnect = publishState(true, false, true, true);
  require(QString::fromLatin1(beforeDisconnect.name) == "streaming" && beforeDisconnect.streaming, "Connected output must be streaming");
@@ -285,7 +436,7 @@ int selfTest(Engine &e) {
  require(QString::fromLatin1(initialConnection.name) == "connecting" && !initialConnection.streaming, "Pending connection must not be streaming");
  const auto failedConnection = publishState(false, false, false, true);
  require(QString::fromLatin1(failedConnection.name) == "ready" && !failedConnection.streaming, "Failed connection must return to ready without streaming");
- e.init(); e.width = 720; e.height = 1280; e.resetVideo();
+ e.init();int meterChecks=testAudioMeters();e.width = 720; e.height = 1280; e.resetVideo();
  auto *settings = obs_data_create(); obs_data_set_int(settings, "width", 1280); obs_data_set_int(settings, "height", 720); obs_data_set_int(settings, "color", 0xffffffff);
  e.visual = obs_source_create_private("color_source_v3", "Synthetic fit test", settings); obs_data_release(settings); require(e.visual, "Synthetic source unavailable");
  e.scene = obs_scene_create_private("Synthetic canvas"); e.fitVisual(); obs_set_output_source(0, obs_scene_get_source(e.scene));
@@ -300,10 +451,23 @@ int selfTest(Engine &e) {
  require(testOverlayFrames>5,"Goal progress bar pixel check failed");
  auto *goalText = e.overlaySources.at(1).first; require(obs_source_get_width(goalText)>0 && obs_source_get_height(goalText)>0,"Goal text texture unavailable");
  e.overlay({{"visible",false}}); require(e.overlaySources.empty(),"Hidden goal must remove public overlay");
+ e.desktop=e.colorSource("Synthetic desktop audio flag",1,1,0);
+ e.volume({{"channel","microphone"},{"volume",25}});e.volume({{"channel","desktop"},{"volume",60}});
+ require(std::abs(obs_source_get_volume(e.mic)-.25f)<.001f && std::abs(obs_source_get_volume(e.desktop)-.60f)<.001f,"Independent audio volume not applied");
+ auto *sameScene=e.scene;e.setScene("pause");require(obs_source_muted(e.desktop),"Interval must mute desktop audio too");
+ e.replaceVisual(e.colorSource("Synthetic replacement video",720,1280,0xff00ff00));
+ require(e.scene==sameScene && e.paused && !obs_sceneitem_visible(e.visualItem),"Switch must preserve scene and interval privacy");
+ e.setScene("live");require(!obs_source_muted(e.desktop) && obs_source_muted(e.mic),"Switch/resume must restore independent mute states");
+ require(std::abs(obs_source_get_volume(e.desktop)-.60f)<.001f,"Switch must preserve desktop volume");
+ auto *sameVisual=e.visual;e.starting=true;bool refused=false;
+ try{e.reconfigure({{"width",720},{"height",1280},{"fps",30},{"sourceType","camera"},{"cameraId","synthetic-missing-device"}});}catch(const std::exception &){refused=true;}
+ require(refused && e.visual==sameVisual && e.scene==sameScene && e.active(),"Unavailable replacement must preserve publishing and previous source");e.starting=false;
+ refused=false;try{e.volume({{"channel","desktop"},{"volume",101}});}catch(const std::exception &){refused=true;}
+ require(refused && std::abs(obs_source_get_volume(e.desktop)-.60f)<.001f,"Invalid volume must preserve previous level");
  obs_remove_raw_video_callback(testFrame, nullptr);
  e.videoEncoder = obs_video_encoder_create("obs_x264", "Synthetic encoder", nullptr, nullptr); e.audioEncoder = obs_audio_encoder_create("ffmpeg_aac", "Synthetic audio encoder", nullptr, 0, nullptr);
  require(e.videoEncoder && e.audioEncoder, "Bundled H264/AAC encoders unavailable");
- send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"pauseRestoresMute",true}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
+ send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
 }
 }
 int main(int argc, char **argv) {
@@ -329,6 +493,8 @@ int main(int argc, char **argv) {
     auto command = stringArg(args, "command", 32); QJsonObject result;
     if (command == "enumerate") result = engine.enumerate();
     else if (command == "prepare") { try { result = engine.prepare(args); } catch (...) { if (!engine.active()) engine.clearSources(); throw; } }
+    else if (command == "reconfigure") result = engine.reconfigure(args);
+    else if (command == "volume") { engine.volume(args); result=engine.status(); }
     else if (command == "start") { try { result = engine.start(args); } catch (...) { if (!engine.active()) engine.releaseOutput(); throw; } }
     else if (command == "stop") { engine.releaseOutput(); engine.clearSources(); result = engine.status(); }
     else if (command == "status") result = engine.status();
@@ -345,5 +511,6 @@ int main(int argc, char **argv) {
   if (inputClosed) { engine.cleanup(); app.quit(); }
  }); poll.start(25);
  QTimer stateTimer; QObject::connect(&stateTimer, &QTimer::timeout, [&] { auto state = engine.status(); state.insert("event", "status"); send(state); }); stateTimer.start(1000);
+ QTimer audioTimer;QObject::connect(&audioTimer,&QTimer::timeout,[&]{if(engine.prepared)send({{"event","audio-levels"},{"channels",engine.audioLevels()}});});audioTimer.start(200);
  send({{"event", "ready"}, {"protocol", 1}}); return app.exec();
 }

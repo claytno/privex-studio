@@ -10,6 +10,8 @@ assert.ok(syntheticResult.validPauseFrames > 5);
 assert.ok(syntheticResult.validOverlayFrames > 5);
 assert.equal(syntheticResult.pauseRestoresMute, true);
 assert.equal(syntheticResult.reconnectionStateChecks, 5);
+assert.equal(syntheticResult.sourceSwitchAndAudioChecks, 7);
+assert.equal(syntheticResult.audioMeterChecks, 8);
 assert.equal(syntheticResult.h264AndAacAvailable, true);
 assert.equal(syntheticResult.networkUsed, false);
 assert.equal(syntheticResult.physicalCaptureUsed, false);
@@ -27,7 +29,7 @@ async function protocol() {
   assert.equal((await call('unknown')).ok, false);
   assert.equal((await call('resize', {bounds:{width:-1,height:100}})).ok, false);
   const devices = await call('enumerate'); assert.equal(devices.ok, true);
-  for (const type of ['cameras','microphones','displays','windows']) assert.ok(Array.isArray(devices.result[type]));
+  for (const type of ['cameras','microphones','desktops','displays','windows']) assert.ok(Array.isArray(devices.result[type]));
   assert.equal((await call('prepare', {sourceType:'camera',cameraId:'missing-device'})).ok, false);
   assert.equal((await call('status')).result.prepared, false);
   assert.equal((await call('mute', {muted:'yes'})).ok, false);

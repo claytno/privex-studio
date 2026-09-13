@@ -35,6 +35,7 @@ function fixture(overrides={}) {
       if(name==='node:fs/promises' && overrides.downloadInstaller)return {...require(name),rm:async()=>{}};
       if (name === './engine.cjs') return { Engine: class {} };
       if (name === './security.cjs') return require('../main/security.cjs');
+      if (name === './audio-meter.cjs') return require('../main/audio-meter.cjs');
       if (name === './installer-update.cjs') return overrides.downloadInstaller?{downloadInstaller:overrides.downloadInstaller,verifyInstaller:overrides.verifyInstaller||async function(){},clearInstalledDownloads:async function(){}}:require('../main/installer-update.cjs');
       if (name === './updates.cjs') return overrides.checkForUpdates?{checkForUpdates:overrides.checkForUpdates}:require('../main/updates.cjs');
       if (name === './update-preferences.cjs') return {loadUpdatePreferences:async()=>true,saveUpdatePreferences:overrides.saveUpdatePreferences||async function(){}};
@@ -366,4 +367,62 @@ test('failed preference persistence does not pretend an opt-out was saved',async
   const {subject}=fixture({saveUpdatePreferences:async()=>{throw new Error('Disk unavailable');}});
   await assert.rejects(subject.command('updates.automatic',{enabled:false}),/Disk unavailable/);
   assert.equal(subject.snapshot().automaticUpdateChecks,true);
+});
+
+
+test('live source switching preserves publishing, interval and configuration on failure',async()=>{
+ const {subject,engineCalls}=fixture();await subject.command('prepare',equipment);
+ await subject.command('scene',{mode:'pause'});subject.configure({studio:ownSession('live'),transmitting:true});
+ await subject.command('prepare',{...equipment,sourceType:'window',sourceId:'synthetic-window'});
+ assert.equal(subject.state().transmitting,true);assert.equal(subject.snapshot().sceneMode,'pause');
+ assert.equal(engineCalls.filter(c=>c.name==='reconfigure').length,1);assert.equal(engineCalls.filter(c=>c.name==='stop'||c.name==='start').length,0);
+ const prior=subject.state().mediaConfig;subject.configure({engine:{request:async()=>{throw Error('Source unavailable');}}});
+ await assert.rejects(subject.command('prepare',{...equipment,cameraId:'gone'}),/unavailable/);
+ assert.equal(subject.state().prepared,true);assert.equal(subject.state().transmitting,true);assert.equal(subject.state().mediaConfig,prior);
+});
+test('live canvas resize is rejected before native changes',async()=>{
+ const {subject,engineCalls}=fixture();await subject.command('prepare',equipment);subject.configure({studio:ownSession('live'),transmitting:true});
+ const count=engineCalls.length;await assert.rejects(subject.command('prepare',{...equipment,portrait:false}),/formato/);assert.equal(engineCalls.length,count);assert.equal(subject.state().prepared,true);
+});
+test('independent audio levels survive preparation and reject invalid IPC',async()=>{
+ const {subject,engineCalls}=fixture();await subject.command('prepare',equipment);
+ await subject.command('volume',{channel:'microphone',volume:35});await subject.command('volume',{channel:'desktop',volume:65});
+ await subject.command('prepare',{...equipment,desktopId:'chosen-speakers'});
+ assert.equal(subject.snapshot().microphoneVolume,35);assert.equal(subject.snapshot().desktopVolume,65);
+ const config=engineCalls.filter(c=>c.name==='reconfigure').at(-1).data;assert.equal(config.microphoneVolume,35);assert.equal(config.desktopVolume,65);assert.equal(config.desktopId,'chosen-speakers');
+ for(const bad of [null,{channel:'system',volume:50},{channel:'desktop',volume:NaN},{channel:'microphone',volume:101},{channel:'desktop',volume:-1}])await assert.rejects(subject.command('volume',bad),/inválido/);
+});
+test('ending during a pending live source switch cannot restore preparation',async()=>{
+ const {subject}=fixture();await subject.command('prepare',equipment);subject.configure({studio:ownSession('live'),transmitting:true});
+ const pending=deferred();subject.configure({engine:{request:async(name)=>name==='reconfigure'?pending.promise:{}}});
+ const changing=subject.command('prepare',{...equipment,cameraId:'second-camera'});await subject.command('end');pending.resolve({prepared:true});await changing;
+ assert.equal(subject.state().prepared,false);assert.equal(subject.state().transmitting,false);
+});
+
+
+test('global goals switch hides native overlay through toggle, manager refresh and polling',async()=>{
+ for(const path of ['toggle','manager','poll']){
+  const {subject,engineCalls}=fixture();let enabled=true;
+  await subject.command('prepare',equipment);
+  subject.configure({studio:ownSession('live'),api:async(_method,route)=>route.endsWith('/commerce')?{controls:{goals_enabled:enabled},goal:{active:true,title:'Synthetic goal',target_cents:10000,raised_cents:2500}}:ownSession('live')});
+  await subject.command('overlay',{enabled:true});
+  assert.equal(engineCalls.filter(c=>c.name==='overlay').at(-1).data.visible,true,path+' initially shows enabled goal');
+  enabled=false;
+  if(path==='toggle')await subject.command('overlay',{enabled:true});
+  else if(path==='manager')await subject.command('manager',{method:'GET',path:'/lives/'+ID+'/commerce'});
+  else await subject.tick();
+  assert.equal(engineCalls.filter(c=>c.name==='overlay').at(-1).data.visible,false,path+' must respect global disable even when goal.active remains true');
+ }
+});
+
+
+test('native meter events expose bounded telemetry separately and clear on stop',async()=>{
+ const {subject}=fixture();const sent=[];
+ subject.configure({win:{isDestroyed:()=>false,webContents:{send:(channel,payload)=>sent.push({channel,payload})}}});
+ await subject.mediaEvent({event:'audio-levels',channels:{microphone:{configured:true,receiving:true,muted:true,inputDb:0,outputDb:0,inputClipping:true,outputClipping:true,rawAudio:[123]}}});
+ assert.equal(subject.snapshot().audioMeters.microphone.inputDb,0);assert.equal(subject.snapshot().audioMeters.microphone.outputDb,-60);
+ assert.equal(sent.length,1);assert.equal(sent[0].channel,'studio:audio-levels');assert.ok(!JSON.stringify(sent).includes('rawAudio'));
+ await subject.command('end');assert.equal(subject.snapshot().audioMeters.microphone.configured,false);
+ await subject.mediaEvent({event:'audio-levels',channels:{microphone:{configured:true,receiving:true,inputDb:0}}});
+ assert.equal(subject.snapshot().audioMeters.microphone.configured,false,'Late native event cannot restore capture indication after stopping');
 });

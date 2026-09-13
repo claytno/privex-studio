@@ -10,7 +10,7 @@ function managerRoute(method, input, sessionId) {
   if (!url.pathname.startsWith(prefix)) throw new Error('Acesso restrito à live deste computador.');
   const tail = url.pathname.slice(prefix.length);
   const routes = {
-    GET: [/^commerce$/, /^orders$/, /^chat$/, /^restrictions$/, /^accounting$/, /^moderation$/, /^users$/],
+    GET: [/^commerce$/, /^orders$/, /^chat$/, /^restrictions$/, /^accounting$/, /^moderation$/, /^users$/, /^audience$/],
     PUT: [/^commerce$/, /^chat\/(rules|pin)$/, /^moderators\/\d+$/],
     POST: [/^chat$/, /^reports$/, /^restrictions$/, /^moderation$/, /^orders\/\d+\/transition$/],
     DELETE: [/^chat\/\d+$/, /^restrictions\/\d+$/, /^moderation\/\d+$/],
@@ -31,10 +31,14 @@ function verificationURL(input) {
 function prepareInput(value) {
   if (!value || !['camera','window','display'].includes(value.sourceType)) throw new Error('Escolha uma fonte.');
   const result = { sourceType:value.sourceType, width:value.portrait ? 720 : 1280, height:value.portrait ? 1280 : 720, fps:30 };
-  for (const key of ['cameraId','microphoneId','sourceId']) {
+  for (const key of ['cameraId','microphoneId','desktopId','sourceId']) {
     if (value[key] != null && (typeof value[key] !== 'string' || value[key].length > 4096 || /[\x00-\x1f]/.test(value[key]))) throw new Error('Equipamento inválido.');
     result[key] = value[key] || '';
   }
   return result;
 }
-module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, uuid };
+function audioInput(value) {
+  if (!value || !['microphone','desktop'].includes(value.channel) || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 100) throw new Error('Volume inválido.');
+  return {channel:value.channel,volume:value.volume};
+}
+module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, uuid };

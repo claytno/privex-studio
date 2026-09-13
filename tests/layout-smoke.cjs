@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),output=path.join(root,'test-results','la
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const id='01234567-89ab-4cde-8fab-0123456789ab';
 const user={id:101,username:'conta_sintetica',name:'Conta de demonstração'};
-let state={version:'teste-local',pendingAccount:user,user:null,studio:null,prepared:false,busy:false};const calls=[];
+let state={version:'teste-local',pendingAccount:user,user:null,studio:null,prepared:false,busy:false};const calls=[];let equipment={cameras:[],microphones:[],desktops:[],windows:[],displays:[]};
 protocol.registerSchemesAsPrivileged([{scheme:'privex',privileges:{standard:true,secure:true,supportFetchAPI:true}}]);
 app.setPath('userData',path.join(output,'profile'));
 app.whenReady().then(async()=>{let win;try{
@@ -14,6 +14,8 @@ app.whenReady().then(async()=>{let win;try{
  protocol.handle('privex',request=>net.fetch(pathToFileURL(path.join(root,'ui',new URL(request.url).pathname)).href));
  ipcMain.handle('studio:command',async(_event,command,payload)=>{
   calls.push({command,payload});if(command==='snapshot')return{ok:true,data:state};
+  if(command==='enumerate')return{ok:true,data:equipment};
+  if(command==='volume'){await delay(40);return{ok:false,error:'Synthetic audio rejection'};}
   if(command==='manager'){
    const route=payload.path;
    if(route.endsWith('/commerce'))return{ok:true,data:{permissions:{manage:true},catalog_version:1,items:[{id:3,kind:'action',title:'Ação de demonstração',amount_cents:500,active:true,delivery_seconds:300,outcomes:[]}],goal:{title:'Meta de teste',active:true,target_cents:10000,raised_cents:0}}};
@@ -34,6 +36,25 @@ app.whenReady().then(async()=>{let win;try{
  await js("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Continuar como @conta_sintetica')).click()");await delay(50);assert.ok(calls.some(c=>c.command==='account.confirm'));
  await fs.writeFile(path.join(output,'account-confirmation.png'),(await win.webContents.capturePage()).toPNG());
  state={version:'teste-local',user,pendingAccount:null,studio:{session:{id,status:'reserved',managed_by_device:true}},prepared:true,transmitting:false,busy:false,muted:false};win.webContents.send('studio:state',state);await delay(250);
+ win.webContents.send('studio:audio-levels',{microphone:{configured:true,receiving:true,muted:false,state:'receiving',inputDb:0,outputDb:-12,inputClipping:true,outputClipping:false},desktop:{configured:true,receiving:false,state:'unavailable'}});await delay(80);
+ assert.equal(await js("document.querySelector('[aria-label=\"Microfone · Entrada\"]').getAttribute('aria-valuenow')"),'0');
+ assert.equal(await js("document.querySelector('[aria-label=\"Microfone · Saída\"]').getAttribute('aria-valuenow')"),'-12');
+ assert.ok(await js("document.querySelector('.meter-clip').textContent.includes('Entrada no limite')"));
+ assert.ok(await js("document.querySelector('[aria-label=\"Medidor de Computador\"]').textContent.includes('Sem dados')"));
+ win.webContents.send('studio:audio-levels',{microphone:{configured:true,receiving:true,muted:true,state:'receiving',inputDb:-6,outputDb:-3,inputClipping:false,outputClipping:true}});await delay(80);
+ assert.equal(await js("document.querySelector('[aria-label=\"Microfone · Saída\"]').getAttribute('aria-valuenow')"),'-60');
+ assert.equal(await js("document.querySelectorAll('.meter-clip').length"),0);
+ equipment={...equipment,cameras:[{id:'synthetic-camera',name:'Synthetic camera'}],microphones:[{id:'default',name:'Windows default'}]};
+ await js("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Atualizar lista')).click()");await delay(100);
+ assert.equal(await js("document.querySelectorAll('.settings-grid select')[1].value"),'synthetic-camera','A first camera attached after empty discovery should be suggested');
+ assert.equal(await js("document.querySelectorAll('.settings-grid select')[2].value"),'default');
+ assert.equal(calls.filter(c=>c.command==='prepare').length,0,'Discovery cannot enable capture');
+ await js("(()=>{const mic=document.querySelectorAll('.settings-grid select')[2];mic.value='';mic.dispatchEvent(new Event('change',{bubbles:true}));})()");
+ await js("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Atualizar lista')).click()");await delay(100);
+ assert.equal(await js("document.querySelectorAll('.settings-grid select')[2].value"),'','Explicit no-microphone choice must survive rediscovery');
+ await js("(()=>{const slider=document.querySelector('[aria-label=\"Volume do microfone\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(slider,'35');slider.dispatchEvent(new Event('input',{bubbles:true}));slider.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowLeft',bubbles:true}));slider.dispatchEvent(new KeyboardEvent('keyup',{key:'ArrowLeft',bubbles:true}));})()");await delay(150);
+ assert.equal(calls.filter(c=>c.command==='volume').length,1,'Duplicate commit must not overlap audio IPC');
+ assert.equal(await js("document.querySelector('[aria-label=\"Volume do microfone\"]').value"),'100','Rejected volume must restore authoritative value even without a changed snapshot');
  await js("[...document.querySelectorAll('[role=tab]')].find(b=>b.textContent.includes('Interações')).click()");await delay(400);
  const layouts=[];
  for(const [width,height,zoom]of[[1000,720,1],[1280,800,1],[1440,940,1.25],[1920,1080,1.5]]){

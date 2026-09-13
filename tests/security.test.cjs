@@ -18,3 +18,10 @@ test('renderer cannot control native output or engine executable configuration',
   assert.equal(config.width,720);assert.equal(config.height,1280);assert.equal(config.fps,30);assert.equal(config.server,undefined);assert.equal(config.parentHwnd,undefined);
   assert.throws(()=>prepareInput({sourceType:'script'}));assert.throws(()=>prepareInput({sourceType:'camera',cameraId:'bad\u0000id'}));
 });
+
+
+test('audience listing stays bound to own live and read-only pagination',()=>{
+ const {managerRoute}=require('../main/security.cjs');const id='01234567-89ab-4cde-8fab-0123456789ab';
+ assert.equal(managerRoute('GET','/lives/'+id+'/audience?page=2',id),'/obs/v1/manager/live/'+id+'/audience?page=2');
+ assert.throws(()=>managerRoute('POST','/lives/'+id+'/audience',id));assert.throws(()=>managerRoute('GET','/lives/'+id+'/audience?q=all',id));
+});
