@@ -3,6 +3,7 @@ import {createRoot} from 'react-dom/client';
 import {Camera,Mic,Monitor,Radio,LogOut,MessageSquare,Gift,ArrowRight,ShieldCheck,RefreshCw,Square,Video,VolumeX,Image,Type,Eye,EyeOff,ChevronUp,ChevronDown,Trash2,Plus,Layers,AppWindow,Film,Pause,Play,Pencil,X,Check,Gamepad2} from 'lucide-react';
 import LiveChatPanel from "../shared/pages/live/LiveChatPanel.jsx";
 import LiveCommerceStudio from "../shared/pages/live/LiveCommerceStudio.jsx";
+import {playInteractionSound,isSoundEnabled,setSoundEnabled} from './sound.js';
 import {invoke} from "./bridge.js";import {setUser} from "./auth.js";import {setSession} from "./adapter.js";
 import "./style.css";
 import useLivePolling from "../shared/hooks/useLivePolling.js";
@@ -62,8 +63,22 @@ function UpdateBanner({info,blocked,run}){
 function UpdatePreferences({state,busy,run}){
   return <details className="update-preferences"><summary>Privacidade e atualizações</summary><label className="mt-3 flex min-h-11 items-center gap-3"><input type="checkbox" className="h-4 w-4 shrink-0 accent-purple-500" checked={state.automaticUpdateChecks!==false} disabled={busy||typeof state.automaticUpdateChecks!=='boolean'} onChange={event=>run('updates.automatic',{enabled:event.target.checked})}/><span>Consultar atualizações automaticamente</span></label><p className="mt-2 leading-relaxed">Consulta privex.site ao abrir e a cada 6 horas. O servidor recebe seu IP e dados técnicos da conexão. Esta consulta não envia sua conta nem a versão instalada. A instalação depende da sua confirmação.</p><p className="mt-2 leading-relaxed">Ao desativar, novas consultas só acontecem quando você verifica ou instala uma atualização manualmente.</p></details>;
 }
+/**
+ * Avisa com som quem está no ar que chegou uma interação. O gatilho é o maior id de
+ * interação da sessão, que já vem no estado do estúdio: nenhuma consulta extra.
+ * O primeiro valor vira apenas o marco inicial, para não tocar ao abrir o gerenciador.
+ */
+function useInteractionAlert(sessionId,interactionSeq,enabled){
+  const seen=useRef({sessionId:null,seq:0});
+  useEffect(()=>{
+    const seq=Number.isSafeInteger(interactionSeq)&&interactionSeq>0?interactionSeq:0;
+    if(!sessionId||!enabled){seen.current={sessionId:null,seq:0};return;}
+    if(seen.current.sessionId!==sessionId){seen.current={sessionId,seq};return;}
+    if(seq>seen.current.seq){seen.current={sessionId,seq};playInteractionSound();}
+  },[sessionId,interactionSeq,enabled]);
+}
 function App(){
-  const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false);
+  const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false),[alertSound,setAlertSound]=useState(isSoundEnabled),[titleEdit,setTitleEdit]=useState(false);
   const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[syncState,setSyncState]=useState({applying:false,appliedKey:'',failedKey:'',error:'',retrying:false}),[previewError,setPreviewError]=useState('');
   const [sourceNotice,setSourceNotice]=useState('');
   const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),initialScene=useRef(''),autoOpened=useRef(false),suggestedScenes=useRef(new Set()),editScope=useRef({}),accountScope=useRef(null),rate=useRef({bytes:0,at:0,kbps:0});
@@ -71,6 +86,9 @@ function App(){
   useEffect(()=>()=>synchronizer.dispose(),[synchronizer]);
   const applying=syncState.applying;
   const session=state.studio?.session;const owned=session?.managed_by_device;const displayStatus=session?.status==='live'&&!session.media_ready?'starting':session?.status;const busy=localBusy||state.busy||applying;const sessionActive=!!session&&['waiting','reserved','starting','live','reconnecting','ending'].includes(session.status);const active=owned&&sessionActive;const displayPortrait=state.prepared?(state.canvasPortrait??portrait):portrait;
+  useInteractionAlert(owned?session.id:null,session?.interaction_seq,active);
+  // Enquanto não há live, o campo é o título da próxima; durante a live ele mostra o título atual.
+  useEffect(()=>{if(active&&session?.title&&!titleEdit)setTitle(session.title);},[active,session?.title,titleEdit]);
   const update=value=>{audioState.current={microphone:value.microphoneVolume??100,desktop:value.desktopVolume??100};setUser(value.user);setSession(value.studio?.session?.managed_by_device?value.studio.session.id:null);setMuted(!!value.muted);setState(value);};
   useEffect(()=>{invoke('snapshot').then(update);const cleanup=window.privex.onState(update);const timer=setInterval(()=>invoke('snapshot').then(update).catch(()=>{}),5000);return()=>{cleanup();clearInterval(timer);};},[]);
   useLayoutEffect(()=>{
@@ -216,7 +234,7 @@ function App(){
             <button className="icon-button" aria-label="Remover fonte" onClick={()=>removeLayer(layer)}><Trash2 size={14}/></button></li>;})}</ul>:<div className="dock-empty"><p>Nenhuma fonte ainda. O que vai aparecer no vídeo?</p><div className="quick-add">{['camera','game','display','window'].map(kind=>{const Icon=KIND_ICONS[kind];return <button key={kind} className="secondary" disabled={busy} onClick={()=>addLayer(kind)}><Plus size={13}/><Icon size={14}/> {KIND_LABELS[kind]}</button>;})}</div>{devices&&!devices.cameras?.length&&<p className="fine">Nenhuma câmera encontrada. Feche outros programas que usam a câmera e clique em Atualizar equipamentos.</p>}</div>}
         </section>
         <section className="dock dock-audio" aria-label="Áudio">
-          <header><h3><Mic size={14}/> Áudio</h3></header>
+          <header><h3><Mic size={14}/> Áudio</h3><label className="fine check" title="Toca um aviso curto neste computador quando alguém compra uma interação. Com o microfone aberto perto da caixa de som, o público pode ouvir."><input type="checkbox" checked={alertSound} onChange={e=>{setSoundEnabled(e.target.checked);setAlertSound(e.target.checked);if(e.target.checked)playInteractionSound();}}/> Aviso de interação</label></header>
           <div className="audio-channels">
             <div className="audio-channel"><label>Microfone<select aria-label="Microfone" disabled={busy||!devices} value={mic} onChange={e=>{initialDevices.current.microphone=true;setMic(e.target.value);}}><option value="">Sem microfone</option>{missingMic&&<option value={mic}>Microfone desconectado</option>}{options(devices?.microphones)}</select></label>
               <ChannelMeter name="Microfone" channel="microphone" prepared={!!state.prepared}/>
@@ -245,7 +263,8 @@ function App(){
       </div>
     </section><aside className="manager"><div className="manager-heading"><h2>Seu gerenciador</h2><p>{active?'Conectado à mesma live do site':'Configure antes da live; aplicado à próxima transmissão'}</p></div><div className="tabbar" role="tablist" aria-label="Gerenciador"><button role="tab" aria-selected={tab==='chat'} onClick={()=>setTab('chat')}><MessageSquare size={17}/> Chat</button><button role="tab" aria-selected={tab==='commerce'} onClick={()=>setTab('commerce')}><Gift size={17}/> Interações</button></div><div className="manager-content" role="tabpanel">{tab==='commerce'?<React.Fragment key={active?session.id:'preset-'+state.user.id}>{active&&<Revenue sessionId={session.id}/>}<LiveCommerceStudio sessionId={active?session.id:null}/></React.Fragment>:active?<LiveChatPanel key={session.id} sessionId={session.id}/>:<div className="manager-empty"><MessageSquare size={30}/><h3>Todo mundo por perto</h3><p>Ao abrir uma sessão, seu chat estará aqui. Prepare metas, roleta e presentes em Interações antes de começar.</p><p className="fine">As interações usam as mesmas regras e registros do site.</p></div>}</div><UpdatePreferences state={state} busy={busy} run={run}/></aside></div>
     <footer className="controlbar"><div className="control-status"><span className="signal"><i/>{statusNames[displayStatus]||'Pronta para preparar'}</span><p>{session?.status==='waiting'?`Posição na fila: ${session.queue_position||'consultando'}`:state.transmitting?`${rate.current.kbps} kbps · ${state.mediaStatus?.droppedFrames||0} quadros perdidos`:'Privex Studio '+state.version+' · 720p · 30 fps'}</p></div>
-      <label className="title-field"><span className="sr-only">Título da live</span><input aria-label="Título da live" value={title} onChange={e=>setTitle(e.target.value)} maxLength={100} disabled={busy||active} placeholder="Título da live · o que vamos fazer hoje?"/></label>
+      <label className="title-field"><span className="sr-only">Título da live</span><input aria-label="Título da live" value={title} onChange={e=>{setTitle(e.target.value);if(active)setTitleEdit(true);}} maxLength={100} disabled={busy} placeholder="Título da live · o que vamos fazer hoje?"/></label>
+      {active&&titleEdit&&<div className="title-actions"><button className="primary" disabled={busy||!title.trim()||title.trim()===session.title} onClick={async()=>{const result=await run('title',{title});if(result!==undefined)setTitleEdit(false);}}><Check size={15}/> Salvar título</button><button className="secondary" disabled={busy} onClick={()=>{setTitle(session.title||'');setTitleEdit(false);}}>Cancelar</button></div>}
       <div className="main-actions"><button className="secondary" onClick={()=>run('site')}><Monitor size={17}/> Abrir site</button>{active?<><button className="danger" disabled={busy} onClick={()=>{if(window.confirm('Encerrar a sessão e interromper o envio de vídeo?'))run('end');}}><Square size={16}/> {session.status==='waiting'?'Sair da fila':'Encerrar live'}</button>{['reserved','reconnecting'].includes(session.status)&&!state.transmitting&&<button className="primary" disabled={busy||!state.prepared||!inSync||!canApply} onClick={()=>run('resume')}>Estou pronta · transmitir</button>}</>:<button className="primary" disabled={busy||!state.prepared||!layers.length||!inSync||!canApply||!title.trim()||session&&!owned} onClick={()=>run('start',{title})}><Radio size={19}/> Iniciar live</button>}</div></footer>
   </main>;
 }

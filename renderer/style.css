@@ -82,3 +82,6 @@
 .layer-dialog>footer{display:flex;flex-shrink:0;justify-content:space-between;gap:10px;padding:8px 12px;border-top:1px solid #2a2733;background:#131219}.layer-dialog>footer button{font-size:13px}
 
 .dock-empty p{margin:0 0 8px}.quick-add{display:flex;flex-wrap:wrap;gap:6px}.quick-add button{font-size:11px;padding:6px 9px}.dock-empty .fine{margin-top:8px}
+
+/* Salvar o título durante a live: ações aparecem ao lado do campo, sem empurrar a barra. */
+.title-actions{display:flex;gap:8px;flex-shrink:0}.title-actions button{font-size:12px;padding:8px 12px;white-space:nowrap}

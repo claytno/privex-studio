@@ -137,6 +137,14 @@ app.whenReady().then(async()=>{let win;try{
  await click('[aria-label="Adicionar fonte"]');await delay(50);await clickText('.add-panel button','Texto');await delay(1600);
  assert.equal(calls.filter(c=>c.command==='prepare').length,beforeRetry+2,'A temporary heartbeat lock retries once and applies the pending source');assert.equal(last('prepare').payload.layers[0].kind,'text');
  await click('[aria-label="Fechar ajustes"]');await delay(50);
+ state={...state,studio:{session:{id,status:'live',managed_by_device:true,title:'Título original',interaction_seq:4}}};win.webContents.send('studio:state',state);await delay(250);
+ assert.equal(await js("document.querySelector('[aria-label=\"Título da live\"]').value"),'Título original','the live title fills the field');
+ assert.equal(await js("document.querySelector('[aria-label=\"Título da live\"]').disabled"),false,'the title stays editable during a live');
+ assert.equal(await js("!![...document.querySelectorAll('button')].find(b=>b.textContent.includes('Salvar título'))"),false,'no save action until something changes');
+ await js("(()=>{const input=document.querySelector('[aria-label=\"Título da live\"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Título corrigido');input.dispatchEvent(new Event('input',{bubbles:true}));})()");await delay(150);
+ await clickText('button','Salvar título');await delay(150);
+ assert.equal(last('title').payload.title,'Título corrigido','saving sends the new title');
+ assert.ok(await js("!!document.querySelector('[aria-label=\"Aviso de interação\"], .dock-audio input[type=checkbox]')"),'the interaction alert can be switched off');
  state={...state,updateInfo:{available:true,latestVersion:'futura',status:'available',progress:0}};win.webContents.send('studio:state',state);await delay(100);assert.equal(await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Atualizar app').disabled"),true);
  state={...state,studio:{session:{id,status:'live',managed_by_device:false}}};win.webContents.send('studio:state',state);await delay(100);assert.equal(await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Atualizar app').disabled"),true,'A live from another device also blocks installation');
  state={...state,studio:{session:null},prepared:false};win.webContents.send('studio:state',state);await delay(100);await js("[...document.querySelectorAll('button')].find(b=>b.textContent==='Atualizar app').click()");await delay(50);assert.ok(calls.some(c=>c.command==='updates.install'));

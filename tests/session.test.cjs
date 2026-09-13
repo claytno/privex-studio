@@ -498,3 +498,19 @@ test('closing the preview releases capture only outside a live',async()=>{
  assert.equal(subject.state().prepared,false);assert.equal(engineCalls.at(-1).name,'stop');
  await subject.command('preview.close');assert.equal(engineCalls.filter(c=>c.name==='stop').length,1,'closing an already closed preview is a no-op');
 });
+
+test('renaming a live is bounded, needs an open session and updates the visible title',async()=>{
+ const {subject,requests}=fixture();
+ subject.configure({studio:{session:null}});
+ await assert.rejects(subject.command('title',{title:'Sem live'}),/Abra uma live/);
+ subject.configure({studio:ownSession('live'),api:async(method,route,body)=>{requests.push({method,route,body});return {session:{id:ID,title:body.title,status:'live'}};}});
+ await subject.command('title',{title:'  Novo   título  '});
+ const call=requests.at(-1);
+ assert.equal(call.method,'PUT');
+ assert.equal(call.route,'/obs/v1/live/'+ID+'/title');
+ assert.equal(call.body.title,'Novo título','whitespace is collapsed before it reaches the server');
+ assert.equal(subject.snapshot().studio.session.title,'Novo título','the interface shows the new title at once');
+ const before=requests.length;
+ for(const bad of [null,{},{title:''},{title:'   '},{title:123},{title:'a'.repeat(101)}])await assert.rejects(subject.command('title',bad),/inválido|1 a 100/);
+ assert.equal(requests.length,before,'a rejected title never reaches the server');
+});

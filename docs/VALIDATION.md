@@ -186,3 +186,28 @@ downloaded signed-installer test remain necessary before a signed public release
 - Not validated: a real game hooked on this server, which has no game GPU;
   anticheat refusal and Vulkan titles (the Vulkan layer is not registered by
   this installer) remain known limits.
+
+## beta.12 live rename and interaction cue (2026-09-13)
+
+- New server surface, published first: PUT /api/lives/studio/title and
+  PUT /api/obs/v1/live/{id}/title rename the caller's own open session, and
+  the studio state carries session.interaction_seq, the highest interaction id
+  of that session. Backend tests cover renaming by the owner only, rejection of
+  empty, blank, over-length and control-character titles, refusal once the live
+  ended, the directory and the viewer endpoint showing the new title, and the
+  counter growing with real purchases while never carrying buyer or amount.
+- 78 Node tests including the Studio rename command: whitespace collapsed before
+  the request, the exact device route used, the visible title updated at once,
+  and six malformed payloads that never reach the server. Layout smoke now edits
+  the title during a live and saves it, and checks the interaction switch exists.
+- The cue adds no polling: it reads a counter already present in the state both
+  surfaces read. One alert every two seconds at most. The Studio switch is in the
+  audio panel because a microphone near the speaker would broadcast the cue.
+- Engine unchanged in behaviour; protocol, self-test, UI smoke, native preview
+  smoke and source audit pass. Packaged app starts against a throwaway profile.
+- Installer 306687003 bytes, SHA-256
+  de6680c0469f28ae9305bd5e754d96655e99016c2d40b14b53b541a7cfa8326f, unsigned
+  beta, published at the immutable URL; manifest offers beta.12 to beta.10 and
+  beta.11; HTTPS download hash matched.
+- Not validated: a real broadcast being renamed mid-air with viewers attached,
+  and the cue heard during an actual live.
