@@ -3,6 +3,7 @@
 #include <tlhelp32.h>
 #include <obs.h>
 #include <obs-audio-controls.h>
+#include <graphics/vec4.h>
 #include <util/base.h>
 #include <util/platform.h>
 #include <QCoreApplication>
@@ -68,6 +69,66 @@ const char *anyFullscreen = "any_fullscreen";
 // A camera, window or display should open at once, so it is awaited before it replaces a working scene.
 // A game hook waits for the game to render and may legitimately never deliver, so it is never awaited.
 bool awaitsFrames(const QString &kind) { return captureKind(kind) && kind != "game"; }
+// A screen capture stops delivering whenever the window is minimized, the game drops its hook
+// on alt-tab or the game stops drawing. libobs then reports no size and the canvas turns black.
+// This filter keeps the last frame it saw, so the scene holds the picture instead of going dark.
+// Never used for a camera: a frozen face would show a person who is no longer in front of it.
+const char *holdFilterId = "privex_hold_frame";
+bool holdsLastFrame(const QString &kind) { return kind == "game" || kind == "window"; }
+struct HoldFilter { obs_source_t *self = nullptr; gs_texrender_t *render = nullptr; uint32_t cx = 0, cy = 0; bool have = false; };
+uint32_t holdTargetWidth(HoldFilter *filter) { auto *target = obs_filter_get_target(filter->self); return target ? obs_source_get_base_width(target) : 0; }
+uint32_t holdTargetHeight(HoldFilter *filter) { auto *target = obs_filter_get_target(filter->self); return target ? obs_source_get_base_height(target) : 0; }
+void holdRender(void *data, gs_effect_t *) {
+ auto *filter = static_cast<HoldFilter *>(data);
+ auto *target = obs_filter_get_target(filter->self);
+ const uint32_t cx = holdTargetWidth(filter), cy = holdTargetHeight(filter);
+ if (target && cx && cy && cx <= 8192 && cy <= 8192 && filter->render) {
+  gs_texrender_reset(filter->render);
+  if (gs_texrender_begin(filter->render, cx, cy)) {
+   vec4 clear; vec4_zero(&clear);
+   gs_clear(GS_CLEAR_COLOR, &clear, 0.0f, 0);
+   gs_ortho(0.0f, float(cx), 0.0f, float(cy), -100.0f, 100.0f);
+   gs_blend_state_push(); gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+   obs_source_video_render(target);
+   gs_blend_state_pop(); gs_texrender_end(filter->render);
+   filter->cx = cx; filter->cy = cy; filter->have = true;
+  }
+ }
+ if (!filter->have || !filter->render) return; // Nothing was ever captured: stay transparent.
+ auto *texture = gs_texrender_get_texture(filter->render); if (!texture) return;
+ auto *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+ gs_effect_set_texture(gs_effect_get_param_by_name(effect, "image"), texture);
+ while (gs_effect_loop(effect, "Draw")) gs_draw_sprite(texture, 0, filter->cx, filter->cy);
+}
+void registerHoldFilter() {
+ static obs_source_info info{};
+ info.id = holdFilterId; info.type = OBS_SOURCE_TYPE_FILTER; info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
+ info.get_name = [](void *) { return "Privex hold frame"; };
+ info.create = [](obs_data_t *, obs_source_t *self) -> void * {
+  auto *filter = new HoldFilter(); filter->self = self;
+  obs_enter_graphics(); filter->render = gs_texrender_create(GS_BGRA, GS_ZS_NONE); obs_leave_graphics();
+  return filter;
+ };
+ info.destroy = [](void *data) {
+  auto *filter = static_cast<HoldFilter *>(data);
+  obs_enter_graphics(); if (filter->render) gs_texrender_destroy(filter->render); obs_leave_graphics();
+  delete filter;
+ };
+ info.get_width = [](void *data) { auto *filter = static_cast<HoldFilter *>(data); const uint32_t live = holdTargetWidth(filter); return live ? live : filter->cx; };
+ info.get_height = [](void *data) { auto *filter = static_cast<HoldFilter *>(data); const uint32_t live = holdTargetHeight(filter); return live ? live : filter->cy; };
+ info.video_render = holdRender;
+ obs_register_source(&info);
+}
+void attachHoldFilter(obs_source_t *source) {
+ auto *filter = obs_source_create_private(holdFilterId, "Privex hold frame", nullptr);
+ if (!filter) return; // Without the filter the source simply behaves as before.
+ obs_source_filter_add(source, filter); obs_source_release(filter);
+}
+// The source itself reports nothing while the filter still shows its last frame.
+bool holdingLastFrame(obs_source_t *source) { return source && obs_source_get_base_width(source) == 0 && obs_source_get_width(source) > 0; }
+// Animated change between two scenes. "cut" keeps the previous instant switch.
+const char *transitionType(const QString &style) { return style == "fade" ? "fade_transition" : style == "cut" ? "cut_transition" : "slide_transition"; }
+bool transitionStyleAllowed(const QString &style) { return style == "slide" || style == "fade" || style == "cut"; }
 
 // The audio callback retains numbers only; raw audio never crosses the native process.
 struct AudioMeter {
@@ -142,7 +203,12 @@ struct Box { int x, y, w, h; uint32_t align; };
 struct Engine {
  bool initialized = false, prepared = false, starting = false, paused = false, desiredMuted = false;
  int width = 1280, height = 720, fps = 30;
- obs_scene_t *scene = nullptr;
+ // The scene on air. A scene change never edits this one: it builds another canvas and hands it
+ // to the transition, so two saved scenes can never end up composed on top of each other.
+ obs_scene_t *scene = nullptr, *pauseScene = nullptr, *overlayScene = nullptr;
+ obs_source_t *transition = nullptr;
+ QString sceneId, transitionStyle, transitionDirection = "left";
+ int transitionMs = 300;
  obs_source_t *mic = nullptr, *desktop = nullptr;
  std::vector<Layer> layers;
  QJsonObject captureConfig;
@@ -171,12 +237,12 @@ struct Engine {
   const auto data = (root + "/data/libobs/").toUtf8(); obs_add_data_path(data.constData());
   obs_audio_info ai{}; ai.samples_per_sec = 48000; ai.speakers = SPEAKERS_STEREO;
   require(obs_reset_audio(&ai), "Audio initialization failed"); resetVideo();
-  const char *modules[] = {"win-dshow", "win-wasapi", "win-capture", "obs-x264", "obs-ffmpeg", "obs-outputs", "rtmp-services", "image-source", "obs-text"};
+  const char *modules[] = {"win-dshow", "win-wasapi", "win-capture", "obs-x264", "obs-ffmpeg", "obs-outputs", "rtmp-services", "image-source", "obs-text", "obs-transitions"};
   for (auto name : modules) {
    const auto path = (root + "/obs-plugins/64bit/" + name + ".dll").toUtf8(); const auto moduleData = (root + "/data/obs-plugins/" + name).toUtf8();
    obs_module_t *m = nullptr; if (obs_open_module(&m, path.constData(), moduleData.constData()) == MODULE_SUCCESS) obs_init_module(m);
   }
-  obs_post_load_modules();
+  obs_post_load_modules(); registerHoldFilter();
  }
  void resetVideo() {
   obs_video_info vi{}; vi.graphics_module = "libobs-d3d11.dll"; vi.fps_num = fps; vi.fps_den = 1;
@@ -195,10 +261,14 @@ struct Engine {
   micMeter.detach();desktopMeter.detach();
   if (display) { obs_display_remove_draw_callback(display, draw, this); obs_display_destroy(display); display = nullptr; }
   if (preview) { DestroyWindow(preview); preview = nullptr; } previewPositioned = false;
-  if (initialized) { obs_set_output_source(0, nullptr); obs_set_output_source(1, nullptr); obs_set_output_source(2, nullptr); }
+  // 0 composition, 1 microphone, 2 computer audio, 3 interval slate, 4 public goal.
+  if (initialized) for (int channel = 0; channel < 5; channel++) obs_set_output_source(channel, nullptr);
   clearLayer(overlaySources); clearLayer(pauseSources); overlayConfig = {}; paused = false;
+  if (transition) { obs_source_release(transition); transition = nullptr; } transitionStyle.clear();
   for (auto &layer : layers) { if (layer.item) obs_sceneitem_remove(layer.item); if (layer.source) obs_source_release(layer.source); } layers.clear();
-  if (scene) { obs_scene_release(scene); scene = nullptr; }
+  if (overlayScene) { obs_scene_release(overlayScene); overlayScene = nullptr; }
+  if (pauseScene) { obs_scene_release(pauseScene); pauseScene = nullptr; }
+  if (scene) { obs_scene_release(scene); scene = nullptr; } sceneId.clear();
   if (mic) { obs_source_release(mic); mic = nullptr; }
   if (desktop) { obs_source_release(desktop); desktop = nullptr; }
   captureConfig = {};
@@ -212,7 +282,8 @@ struct Engine {
   const int w = int(e->width * scale), h = int(e->height * scale);
   gs_viewport_push(); gs_projection_push();
   gs_set_viewport((int(cx) - w) / 2, (int(cy) - h) / 2, w, h); gs_ortho(0, float(e->width), 0, float(e->height), -100, 100);
-  obs_source_video_render(obs_scene_get_source(e->scene)); gs_projection_pop(); gs_viewport_pop();
+  // The published mix, not one scene: the preview shows the transition, the interval and the goal.
+  obs_render_main_texture(); gs_projection_pop(); gs_viewport_pop();
  }
  void resize(const QJsonObject &bounds) {
   try {
@@ -241,8 +312,12 @@ struct Engine {
  void clearLayer(std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> &sources) {
   for (auto [source, item] : sources) { if (item) obs_sceneitem_remove(item); if (source) obs_source_release(source); } sources.clear();
  }
- void addLayerSource(std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> &sources, obs_source_t *source, float x, float y) {
-  require(source, "Native overlay source unavailable"); auto *item = obs_scene_add(scene, source);
+ obs_scene_t *ensureScene(obs_scene_t *&target, const char *name) {
+  if (!target) { target = obs_scene_create_private(name); require(target, "Overlay canvas creation failed"); }
+  return target;
+ }
+ void addLayerSource(obs_scene_t *target, std::vector<std::pair<obs_source_t *, obs_sceneitem_t *>> &sources, obs_source_t *source, float x, float y) {
+  require(source, "Native overlay source unavailable"); require(target, "Overlay canvas unavailable"); auto *item = obs_scene_add(target, source);
   if (!item) { obs_source_release(source); throw std::runtime_error("Native overlay composition failed"); }
   obs_sceneitem_set_alignment(item, OBS_ALIGN_TOP | OBS_ALIGN_LEFT); vec2 pos{x,y}; obs_sceneitem_set_pos(item, &pos); sources.push_back({source,item});
  }
@@ -282,7 +357,7 @@ struct Engine {
    n.insert("file", QDir::toNativeSeparators(info.absoluteFilePath()));
   }
   else if (kind == "text") { const auto text = stringArg(spec, "text", 200).trimmed(); require(!text.isEmpty(), "Text source needs text"); n.insert("text", text); }
-  else { n.insert("width", spec.value("width").toInt(1280)); n.insert("height", spec.value("height").toInt(720)); n.insert("color", spec.value("color").toDouble(4294967295.0)); }
+  else { n.insert("width", spec.value("width").toInt(1280)); n.insert("height", spec.value("height").toInt(720)); n.insert("color", spec.value("color").toDouble(4294967295.0)); if (spec.value("flaky").toBool()) n.insert("flaky", true); }
   return n;
  }
  // Explicit layer list, or the single-source form used by earlier hosts. Every device id is checked against the current enumeration.
@@ -319,6 +394,7 @@ struct Engine {
    if (kind == "window") { obs_data_set_int(settings, "priority", 1); obs_data_set_int(settings, "method", 2); obs_data_set_bool(settings, "cursor", true); obs_data_set_bool(settings, "capture_audio", false); } // Exact selected title; never whole-screen fallback.
    source = obs_source_create_private(captureType(kind), "Privex video", settings); obs_data_release(settings); require(source, "Video capture creation failed");
    obs_source_set_audio_mixers(source, 0); obs_source_set_muted(source, true); // Camera embedded audio must not bypass the selected/muted microphone.
+   if (holdsLastFrame(kind)) attachHoldFilter(source); // Alt-tab or a minimized window holds the picture instead of going black.
   } else if (kind == "image") {
    auto *settings = obs_data_create(); obs_data_set_string(settings, "file", n.value("file").toString().toUtf8().constData()); obs_data_set_bool(settings, "unload", false); obs_data_set_bool(settings, "linear_alpha", false);
    source = obs_source_create_private("image_source", "Privex image", settings); obs_data_release(settings); require(source, "Image source creation failed");
@@ -327,6 +403,9 @@ struct Engine {
    const int px = std::max(12, int(std::lround(std::min(width, height) * (corner ? n.value("size").toDouble(0.3) * 0.14 : 0.06))));
    source = textSource("Privex text", n.value("text").toString(), px, box.w, box.h, corner ? (c.endsWith('l') ? "left" : "right") : "center", corner ? (c.startsWith('t') ? "top" : "bottom") : "center", true);
    require(source, "Text source creation failed");
+  } else if (diagnosticSelfTest && n.value("flaky").toBool()) {
+   source = obs_source_create_private("privex_synthetic_flaky", "Synthetic flaky capture", nullptr);
+   require(source, "Synthetic flaky source unavailable"); attachHoldFilter(source);
   } else source = colorSource("Privex synthetic layer", n.value("width").toInt(), n.value("height").toInt(), uint32_t(n.value("color").toDouble()));
   require(source, "Layer source creation failed"); return source;
  }
@@ -355,11 +434,55 @@ struct Engine {
   for (auto &old : layers) { if (old.item) obs_sceneitem_remove(old.item); old.item = nullptr; }
   // Index 0 is the front-most layer: it was added last so renders above the others.
   for (auto &layer : next) obs_sceneitem_set_visible(layer.item, layer.visible && !paused);
-  for (auto [source, item] : pauseSources) obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
-  for (auto [source, item] : overlaySources) obs_sceneitem_set_order(item, OBS_ORDER_MOVE_TOP);
+ }
+ // Hands the composition on air to the transition. A style without animation, or a missing
+ // transitions module, still changes the scene: it simply appears at once.
+ void showScene() {
+  require(scene, "Canvas unavailable");
+  auto *target = obs_scene_get_source(scene);
+  if (!transition) { obs_set_output_source(0, target); return; }
+  if (transitionMs > 0 && transitionStyle != "cut" && obs_transition_start(transition, OBS_TRANSITION_MODE_AUTO, uint32_t(transitionMs), target)) return;
+  obs_transition_set(transition, target);
+ }
+ void setTransition(const QString &style, int durationMs) {
+  require(transitionStyleAllowed(style), "Invalid scene transition");
+  require(durationMs >= 0 && durationMs <= 2000, "Invalid scene transition duration");
+  transitionMs = durationMs;
+  if (transition && transitionStyle == style) return;
+  obs_source_t *next = nullptr;
+  for (const char *id : {transitionType(style), "fade_transition", "cut_transition"}) {
+   obs_data_t *settings = nullptr;
+   if (QString::fromLatin1(id) == "slide_transition") { settings = obs_data_create(); obs_data_set_string(settings, "direction", transitionDirection.toUtf8().constData()); }
+   next = obs_source_create_private(id, "Privex scene transition", settings);
+   if (settings) obs_data_release(settings);
+   if (next) break;
+  }
+  transitionStyle = style;
+  // Without the bundled transitions the scene still changes; only the animation is missing.
+  if (!next) { if (scene) obs_set_output_source(0, obs_scene_get_source(scene)); return; }
+  obs_transition_set_size(next, uint32_t(width), uint32_t(height));
+  obs_transition_set_alignment(next, OBS_ALIGN_CENTER);
+  obs_transition_set_scale_type(next, OBS_TRANSITION_SCALE_ASPECT);
+  if (scene) obs_transition_set(next, obs_scene_get_source(scene));
+  auto *previous = transition; transition = next;
+  obs_set_output_source(0, transition);
+  if (previous) obs_source_release(previous);
+ }
+ QJsonObject transitionArgs(const QJsonObject &args) {
+  QJsonObject value{{"style", "slide"}, {"durationMs", 300}};
+  if (!args.contains("transition")) return value;
+  require(args.value("transition").isObject(), "Invalid scene transition");
+  const auto given = args.value("transition").toObject();
+  const auto style = given.contains("style") ? stringArg(given, "style", 8) : QString("slide");
+  require(transitionStyleAllowed(style), "Invalid scene transition");
+  const double ms = given.value("durationMs").toDouble(300);
+  require(std::isfinite(ms) && ms >= 0 && ms <= 2000 && std::floor(ms) == ms, "Invalid scene transition duration");
+  return {{"style", style}, {"durationMs", int(ms)}};
  }
  // Replaces the composed layers. Unchanged sources are reused so a camera is not reopened; on failure nothing changes.
- void applyLayers(const QJsonArray &specs, bool waitReady) {
+ // animate: this is another saved scene, so it is composed on a separate canvas and shown by the
+ // transition. The scene on air is never edited into the new one, which is what used to mix them.
+ void applyLayers(const QJsonArray &specs, bool waitReady, bool animate = false) {
   require(scene, "Canvas unavailable");
   std::vector<Layer> next; std::vector<obs_source_t *> showing; next.reserve(specs.size()); showing.reserve(specs.size());
   try {
@@ -385,14 +508,31 @@ struct Engine {
    for (auto &old : layers) old.claimed = false;
    throw;
   }
-  Swap swap{this, &next, false};
-  obs_scene_atomic_update(scene, [](void *data, obs_scene_t *) { auto *s = static_cast<Swap *>(data); s->engine->swapLayersLocked(*s->next, s->failed); }, &swap);
-  if (swap.failed) {
+  bool failed = false; obs_scene_t *fresh = nullptr;
+  if (animate) {
+   fresh = obs_scene_create_private("Privex canvas");
+   if (!fresh) failed = true;
+   // Index 0 is the front-most layer: it is added last so it renders above the others.
+   else for (auto it = next.rbegin(); it != next.rend(); ++it) {
+    auto *item = diagnosticSelfTest && selfTestFailLayerAfter == 0 ? nullptr : obs_scene_add(fresh, it->source);
+    if (diagnosticSelfTest && selfTestFailLayerAfter > 0) selfTestFailLayerAfter--;
+    if (!item) { failed = true; break; }
+    placeLayer(item, it->spec); obs_sceneitem_set_visible(item, it->visible && !paused); it->item = item;
+   }
+  } else {
+   Swap swap{this, &next, false};
+   obs_scene_atomic_update(scene, [](void *data, obs_scene_t *) { auto *s = static_cast<Swap *>(data); s->engine->swapLayersLocked(*s->next, s->failed); }, &swap);
+   failed = swap.failed;
+  }
+  if (failed) {
+   if (fresh) { for (auto &layer : next) layer.item = nullptr; obs_scene_release(fresh); }
    for (auto *s : showing) obs_source_dec_showing(s);
    for (auto &layer : next) if (layer.created && layer.source) obs_source_release(layer.source);
    for (auto &old : layers) old.claimed = false;
    throw std::runtime_error("Could not compose scene layer; previous sources preserved");
   }
+  // The transition keeps the previous canvas alive while it slides away, then releases it.
+  if (fresh) { auto *previous = scene; scene = fresh; showScene(); obs_scene_release(previous); }
   for (auto &old : layers) if (!old.claimed && old.source) obs_source_release(old.source);
   layers = std::move(next); for (auto *s : showing) obs_source_dec_showing(s);
  }
@@ -405,45 +545,47 @@ struct Engine {
  bool videoReady() const { for (auto &l : layers) if (l.visible && l.source && obs_source_get_width(l.source) > 0 && obs_source_get_height(l.source) > 0) return true; return false; }
  QJsonArray layerStatus() const {
   QJsonArray result;
-  for (auto &l : layers) { const int w = l.source ? int(obs_source_get_width(l.source)) : 0, h = l.source ? int(obs_source_get_height(l.source)) : 0; result.append(QJsonObject{{"kind", l.spec.value("kind")}, {"visible", l.visible}, {"ready", w > 0 && h > 0}, {"width", w}, {"height", h}}); }
+  for (auto &l : layers) { const int w = l.source ? int(obs_source_get_width(l.source)) : 0, h = l.source ? int(obs_source_get_height(l.source)) : 0; result.append(QJsonObject{{"kind", l.spec.value("kind")}, {"visible", l.visible}, {"ready", w > 0 && h > 0}, {"holding", holdingLastFrame(l.source)}, {"width", w}, {"height", h}}); }
   return result;
  }
  void setScene(const QString &mode) {
   require(prepared && scene,"Prepare video before selecting a scene"); require(mode == "pause" || mode == "live","Invalid scene mode");
   if (mode == "pause" && pauseSources.empty()) {
-   addLayerSource(pauseSources,colorSource("Privex interval background",width,height,0xff181018),0,0);
-   addLayerSource(pauseSources,textSource("Privex interval title",QString::fromUtf8("Voltamos em instantes"),width < height ? 38 : 48,width-96,180),48,float(height/2-70));
+   ensureScene(pauseScene,"Privex interval");
+   addLayerSource(pauseScene,pauseSources,colorSource("Privex interval background",width,height,0xff181018),0,0);
+   addLayerSource(pauseScene,pauseSources,textSource("Privex interval title",QString::fromUtf8("Voltamos em instantes"),width < height ? 38 : 48,width-96,180),48,float(height/2-70));
   }
   paused = mode == "pause";
   for (auto &layer : layers) if (layer.item) obs_sceneitem_set_visible(layer.item, layer.visible && !paused);
-  for (auto [source,item] : pauseSources) obs_sceneitem_set_visible(item,paused);
+  // The slate is its own canvas above the scene, so a scene change during the interval stays private.
+  obs_set_output_source(3, paused && pauseScene ? obs_scene_get_source(pauseScene) : nullptr);
   if (mic) obs_source_set_muted(mic,paused || desiredMuted);
   if (desktop) obs_source_set_muted(desktop,paused);
-  // Keep the verified public goal above the interval slate as well.
-  for (auto [source,item] : overlaySources) obs_sceneitem_set_order(item,OBS_ORDER_MOVE_TOP);
  }
+ // The verified public goal renders above the scene and above the interval slate.
+ void publishOverlay() { obs_set_output_source(4, overlaySources.empty() || !overlayScene ? nullptr : obs_scene_get_source(overlayScene)); }
  void overlay(const QJsonObject &args) {
   require(args.value("visible").isBool(),"Invalid overlay visibility");
-  if (!args.value("visible").toBool()) { clearLayer(overlaySources); overlayConfig = {}; return; }
+  if (!args.value("visible").toBool()) { clearLayer(overlaySources); overlayConfig = {}; publishOverlay(); return; }
   require(prepared && scene,"Prepare video before showing an overlay");
   auto title = stringArg(args,"title",100).simplified(); require(!title.isEmpty(),"Goal title required");
   double raised = args.value("raisedCents").toDouble(-1), target = args.value("targetCents").toDouble(-1);
   require(std::isfinite(raised) && std::isfinite(target) && raised >= 0 && target > 0 && raised <= 1e12 && target <= 1e12 && std::floor(raised)==raised && std::floor(target)==target,"Invalid goal amounts");
   QJsonObject next{{"visible",true},{"title",title},{"raisedCents",raised},{"targetCents",target}}; if (next == overlayConfig) return;
-  clearLayer(overlaySources);
+  clearLayer(overlaySources); ensureScene(overlayScene,"Privex goal");
   try {
    const float scale = float(std::min(width,height)) / 720.0f;
    int margin = int(20*scale), boxWidth = int((width<height?500:440)*scale), boxHeight = int(76*scale), y = height-margin-boxHeight;
    int inset = int(10*scale), barHeight = int(6*scale), barY = y+boxHeight-int(14*scale);
-   addLayerSource(overlaySources,colorSource("Privex goal background",boxWidth,boxHeight,0xe6171717),float(margin),float(y));
+   addLayerSource(overlayScene,overlaySources,colorSource("Privex goal background",boxWidth,boxHeight,0xe6171717),float(margin),float(y));
    auto amount = [](double cents) { return QString::number(cents / 100.0,'f',2).replace('.',','); };
    auto shortTitle = title.size()>44?title.left(43)+QString::fromUtf8("…"):title;
    auto label = shortTitle + "\nR$ " + amount(raised) + " de R$ " + amount(target);
-   addLayerSource(overlaySources,textSource("Privex goal text",label,int(16*scale),boxWidth-inset*2,int(50*scale)),float(margin+inset),float(y+int(7*scale)));
-   addLayerSource(overlaySources,colorSource("Privex goal track",boxWidth-inset*2,barHeight,0xff4b444b),float(margin+inset),float(barY));
-   if (raised > 0) addLayerSource(overlaySources,colorSource("Privex goal progress",int((boxWidth-inset*2)*std::min(1.0,raised/target)),barHeight,0xffc22ced),float(margin+inset),float(barY));
-   overlayConfig = next;
-  } catch (...) { clearLayer(overlaySources); overlayConfig={}; throw; }
+   addLayerSource(overlayScene,overlaySources,textSource("Privex goal text",label,int(16*scale),boxWidth-inset*2,int(50*scale)),float(margin+inset),float(y+int(7*scale)));
+   addLayerSource(overlayScene,overlaySources,colorSource("Privex goal track",boxWidth-inset*2,barHeight,0xff4b444b),float(margin+inset),float(barY));
+   if (raised > 0) addLayerSource(overlayScene,overlaySources,colorSource("Privex goal progress",int((boxWidth-inset*2)*std::min(1.0,raised/target)),barHeight,0xffc22ced),float(margin+inset),float(barY));
+   overlayConfig = next; publishOverlay();
+  } catch (...) { clearLayer(overlaySources); overlayConfig={}; publishOverlay(); throw; }
  }
  QJsonObject enumerate() {
   init(); QJsonArray games{QJsonObject{{"id", anyFullscreen}, {"name", QString::fromUtf8("Qualquer jogo em tela cheia")}}}; for (const auto &w : list("game_capture", "window")) games.append(w);
@@ -473,7 +615,11 @@ struct Engine {
   try {
    if(changeMic) nextMic=createAudio("wasapi_input_capture","Privex microphone",microphoneId);
    if(changeDesktop) nextDesktop=createAudio("wasapi_output_capture","Privex desktop audio",desktopId);
-   applyLayers(specs, true);
+   const auto animation = transitionArgs(args); setTransition(animation.value("style").toString(), animation.value("durationMs").toInt());
+   const auto nextScene = args.contains("sceneId") ? stringArg(args, "sceneId", 40) : sceneId;
+   // Only another saved scene animates; editing the scene on air keeps its sources in place.
+   applyLayers(specs, true, !sceneId.isEmpty() && nextScene != sceneId);
+   sceneId = nextScene;
    if(changeMic){if(nextMic){obs_source_set_volume(nextMic,micVolume);obs_source_set_muted(nextMic,paused||desiredMuted);}micMeter.detach();obs_set_output_source(1,nextMic);if(mic)obs_source_release(mic);mic=nextMic;nextMic=nullptr;micMeter.attach(mic);}
    if(changeDesktop){if(nextDesktop){obs_source_set_volume(nextDesktop,desktopVolume);obs_source_set_muted(nextDesktop,paused);}desktopMeter.detach();obs_set_output_source(2,nextDesktop);if(desktop)obs_source_release(desktop);desktop=nextDesktop;nextDesktop=nullptr;desktopMeter.attach(desktop);}
    captureConfig=args;return status();
@@ -487,7 +633,9 @@ struct Engine {
   require((width == 1280 && height == 720) || (width == 720 && height == 1280) || (width == 1920 && height == 1080) || (width == 1080 && height == 1920), "Unsupported canvas size");
   require(fps == 30, "Pilot supports 30 fps"); resetVideo();
   const auto specs = layerSpecs(args);
-  scene = obs_scene_create_private("Privex canvas"); require(scene, "Canvas creation failed"); applyLayers(specs, false); obs_set_output_source(0, obs_scene_get_source(scene));
+  scene = obs_scene_create_private("Privex canvas"); require(scene, "Canvas creation failed"); applyLayers(specs, false);
+  sceneId = args.contains("sceneId") ? stringArg(args, "sceneId", 40) : QString();
+  const auto animation = transitionArgs(args); setTransition(animation.value("style").toString(), animation.value("durationMs").toInt());
   auto microphoneId = args.value("microphoneId").toString();
   if (!microphoneId.isEmpty()) {
    require(hasId(list("wasapi_input_capture", "device_id"), microphoneId), "Selected microphone is unavailable");
@@ -505,6 +653,18 @@ struct Engine {
   micMeter.attach(mic);desktopMeter.attach(desktop);
   desiredMuted=args.value("muted").toBool(false);captureConfig=args;attachPreview(args); prepared = true; return status();
  }
+ // Publishing delay: zerolatency drops B-frames and the encoder lookahead, and one keyframe per
+ // second lets the server start decoding at once. Together they remove roughly half a second
+ // between this computer and the server. The server re-encodes for the audience, so what the
+ // viewer sees keeps its bitrate and its quality.
+ obs_data_t *videoEncoderSettings() const {
+  auto *settings = obs_data_create();
+  obs_data_set_int(settings, "bitrate", width * height > 1280 * 720 ? 4500 : 2500);
+  obs_data_set_string(settings, "rate_control", "CBR"); obs_data_set_string(settings, "preset", "veryfast");
+  obs_data_set_string(settings, "profile", "high"); obs_data_set_string(settings, "tune", "zerolatency");
+  obs_data_set_int(settings, "bf", 0); obs_data_set_int(settings, "keyint_sec", 1);
+  return settings;
+ }
  QJsonObject start(QJsonObject args) {
   require(prepared && videoReady(), "Wait for a working video source before starting"); require(!active(), "Stream is already starting or active"); releaseOutput();
   QString server = stringArg(args, "server", 2048), key = stringArg(args, "streamKey", 4096); QUrl url(server);
@@ -512,7 +672,7 @@ struct Engine {
   obs_data_t *settings = obs_data_create(); obs_data_set_string(settings, "server", server.toUtf8().constData()); obs_data_set_string(settings, "key", key.toUtf8().constData()); obs_data_set_bool(settings, "use_auth", false);
   service = obs_service_create_private("rtmp_custom", "Privex secure publish", settings); obs_data_release(settings);
   key.fill(QChar(0)); args.remove("streamKey"); require(service, "Publish service unavailable");
-  settings = obs_data_create(); obs_data_set_int(settings, "bitrate", width * height > 1280 * 720 ? 4500 : 2500); obs_data_set_string(settings, "rate_control", "CBR"); obs_data_set_string(settings, "preset", "veryfast"); obs_data_set_string(settings, "profile", "high"); obs_data_set_int(settings, "keyint_sec", 2);
+  settings = videoEncoderSettings();
   videoEncoder = obs_video_encoder_create("obs_x264", "Privex H264", settings, nullptr); obs_data_release(settings); require(videoEncoder, "H264 encoder unavailable");
   settings = obs_data_create(); obs_data_set_int(settings, "bitrate", 128); audioEncoder = obs_audio_encoder_create("ffmpeg_aac", "Privex AAC", settings, 0, nullptr); obs_data_release(settings); require(audioEncoder, "AAC encoder unavailable");
   obs_encoder_set_video(videoEncoder, obs_get_video()); obs_encoder_set_audio(audioEncoder, obs_get_audio());
@@ -527,12 +687,32 @@ struct Engine {
   if (stopCode != 999) starting = false;
   const auto publish = publishState(connected.load(), output && obs_output_reconnecting(output), starting, prepared);
   const Layer *primary = primaryLayer();
-  return {{"prepared", prepared}, {"state", QString::fromLatin1(publish.name)}, {"streaming", publish.streaming}, {"width", width}, {"height", height}, {"fps", fps}, {"muted", !mic || obs_source_muted(mic)}, {"sceneMode",paused?"pause":"live"}, {"overlayVisible",!overlaySources.empty()}, {"sourceWidth", primary ? int(obs_source_get_width(primary->source)) : 0}, {"sourceHeight", primary ? int(obs_source_get_height(primary->source)) : 0}, {"layers", layerStatus()}, {"totalBytes", output ? double(obs_output_get_total_bytes(output)) : 0}, {"droppedFrames", output ? obs_output_get_frames_dropped(output) : 0}, {"stopCode", stopCode == 999 ? QJsonValue() : QJsonValue(stopCode.load())}};
+  return {{"prepared", prepared}, {"state", QString::fromLatin1(publish.name)}, {"streaming", publish.streaming}, {"width", width}, {"height", height}, {"fps", fps}, {"muted", !mic || obs_source_muted(mic)}, {"sceneMode",paused?"pause":"live"}, {"sceneId",sceneId}, {"transition",transitionStyle}, {"transitionMs",transitionMs}, {"overlayVisible",!overlaySources.empty()}, {"sourceWidth", primary ? int(obs_source_get_width(primary->source)) : 0}, {"sourceHeight", primary ? int(obs_source_get_height(primary->source)) : 0}, {"layers", layerStatus()}, {"totalBytes", output ? double(obs_output_get_total_bytes(output)) : 0}, {"droppedFrames", output ? obs_output_get_frames_dropped(output) : 0}, {"stopCode", stopCode == 999 ? QJsonValue() : QJsonValue(stopCode.load())}};
  }
  QJsonObject audioLevels(){return {{"microphone",micMeter.read(mic)},{"desktop",desktopMeter.read(desktop)}};}
 };
 
 std::atomic<int> testFrames = 0, testFitFrames = 0, testStage = 0, testPauseFrames = 0, testOverlayFrames = 0, testCornerFrames = 0, testHiddenFrames = 0, testEmptyFrames = 0;
+std::atomic<int> testLiveCaptureFrames = 0, testHeldCaptureFrames = 0, testSwitchFrames = 0;
+std::atomic<bool> testCaptureStopped = false;
+// A capture that stops delivering exactly like a minimized window or a game that drops its hook.
+void registerFlakySource() {
+ static obs_source_info info{};
+ info.id = "privex_synthetic_flaky"; info.type = OBS_SOURCE_TYPE_INPUT; info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW;
+ info.get_name = [](void *) { return "Synthetic flaky capture"; };
+ info.create = [](obs_data_t *, obs_source_t *self) -> void * { return self; };
+ info.destroy = [](void *) {};
+ info.get_width = [](void *) -> uint32_t { return testCaptureStopped ? 0u : 640u; };
+ info.get_height = [](void *) -> uint32_t { return testCaptureStopped ? 0u : 360u; };
+ info.video_render = [](void *, gs_effect_t *) {
+  if (testCaptureStopped) return;
+  auto *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
+  vec4 color; vec4_from_rgba(&color, 0xff0000ffu);
+  gs_effect_set_vec4(gs_effect_get_param_by_name(solid, "color"), &color);
+  while (gs_effect_loop(solid, "Solid")) gs_draw_sprite(nullptr, 0, 640, 360);
+ };
+ obs_register_source(&info);
+}
 void testFrame(void *, video_data *frame) {
  testFrames++;
  // Portrait canvas, full landscape source: center white, top/bottom letterbox black.
@@ -547,6 +727,11 @@ void testFrame(void *, video_data *frame) {
  if (testStage == 3 && cornerPx[2] > 200 && cornerPx[1] < 60 && cornerPx[0] < 60 && besideCorner[0] < 20 && besideCorner[2] < 20 && center[0] > 230) testCornerFrames++;
  if (testStage == 4 && cornerPx[0] < 20 && cornerPx[1] < 20 && cornerPx[2] < 20 && center[0] > 230) testHiddenFrames++;
  if (testStage == 5 && top[0] < 20 && top[1] < 20 && top[2] < 20 && center[0] < 20 && center[1] < 20 && center[2] < 20 && bottom[0] < 20 && bottom[1] < 20 && bottom[2] < 20) testEmptyFrames++;
+ // Held frame: the capture picture must stay on the canvas after the source stops delivering.
+ const bool redPicture = center[2] > 200 && center[1] < 60 && center[0] < 60 && top[0] < 20 && top[1] < 20 && top[2] < 20;
+ if (testStage == 6 && redPicture) testLiveCaptureFrames++;
+ if (testStage == 7 && redPicture) testHeldCaptureFrames++;
+ if (testStage == 8 && center[1] > 200 && center[0] < 60 && center[2] < 60 && top[1] < 20) testSwitchFrames++;
 }
 int testAudioMeters(){
  require(AudioMeter::boundedDb(-INFINITY)==-60 && AudioMeter::boundedDb(NAN)==-60 && AudioMeter::boundedDb(12)==0 && AudioMeter::boundedDb(-12)==-12,"Meter numerical bounds failed");
@@ -579,6 +764,10 @@ int selfTest(Engine &e) {
  require(awaitsFrames("camera") && awaitsFrames("window") && awaitsFrames("display"),"Real devices must be awaited before replacing a scene");
  require(!awaitsFrames("game"),"A game hook must never block a scene change while the game is not rendering");
  require(!awaitsFrames("image") && !awaitsFrames("text") && !awaitsFrames("synthetic"),"Only capture devices are awaited");
+ require(holdsLastFrame("game") && holdsLastFrame("window"),"A screen capture must hold its last frame when it stops delivering");
+ require(!holdsLastFrame("camera") && !holdsLastFrame("display") && !holdsLastFrame("image"),"A camera must never show a frozen picture of a person");
+ require(QString::fromLatin1(transitionType("slide"))=="slide_transition" && QString::fromLatin1(transitionType("fade"))=="fade_transition" && QString::fromLatin1(transitionType("cut"))=="cut_transition","Scene transition mapping changed");
+ require(transitionStyleAllowed("slide") && transitionStyleAllowed("fade") && transitionStyleAllowed("cut") && !transitionStyleAllowed("stinger"),"Only the bundled transitions are accepted");
  const auto scaled=previewRectangle({{"x",10.25},{"y",20.5},{"width",200.5},{"height",112.75},{"viewport",QJsonObject{{"width",800},{"height",600}}}},1200,900);
  require(scaled.x==15&&scaled.y==31&&scaled.width==301&&scaled.height==169,"Preview CSS-to-physical edge rounding failed");
  const auto edge=previewRectangle({{"x",700.5},{"y",500.5},{"width",99.5},{"height",99.5},{"viewport",QJsonObject{{"width",800},{"height",600}}}},1200,900);
@@ -648,10 +837,40 @@ int selfTest(Engine &e) {
  testStage=5;Sleep(500);require(testEmptyFrames>5,"Removed sources must disappear from rendered video");
  e.setScene("pause");require(e.paused&&obs_source_muted(e.desktop),"Empty canvas must still permit interval");e.setScene("live");require(!e.paused&&!obs_source_muted(e.desktop),"Empty canvas must restore audio after interval");
  e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280,720,white))},false);require(e.videoReady()&&e.active(),"Adding a source back after empty canvas must preserve publishing");e.starting=false;
+ // A capture that stops delivering keeps its last frame instead of turning the canvas black.
+ registerFlakySource(); testCaptureStopped=false;
+ e.applyLayers(QJsonArray{e.normalizeLayer(QJsonObject{{"kind","synthetic"},{"flaky",true}})},false);
+ testStage=6;Sleep(700);require(testLiveCaptureFrames>5,"Synthetic capture did not reach the canvas");
+ require(!holdingLastFrame(e.layers[0].source),"A delivering capture must not be reported as frozen");
+ testCaptureStopped=true;Sleep(300);testStage=7;testHeldCaptureFrames=0;Sleep(700);
+ require(testHeldCaptureFrames>5,"A stopped capture must hold its last frame instead of going black");
+ require(holdingLastFrame(e.layers[0].source) && e.videoReady(),"A held frame must be reported as frozen and keep the canvas usable");
+ testCaptureStopped=false;Sleep(200);
+ // A scene change composes another canvas: the scene on air is never edited into the new one.
+ auto *beforeChange=e.scene;e.setTransition("cut",0);
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280,720,green))},false,true);
+ require(e.scene!=beforeChange && e.layers.size()==1 && e.layers[0].item,"A scene change must compose on its own canvas");
+ testStage=8;Sleep(600);require(testSwitchFrames>5,"Scene change did not reach the canvas");
+ auto *keptScene=e.scene;auto *keptSource=e.layers[0].source;e.starting=true;e.selfTestFailLayerAfter=0;refused=false;
+ try{e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280,720,white))},false,true);}catch(const std::exception &){refused=true;}
+ e.selfTestFailLayerAfter=-1;
+ require(refused && e.scene==keptScene && e.layers.size()==1 && e.layers[0].source==keptSource && e.active(),"A failed scene change must keep the scene on air");e.starting=false;
+ e.setTransition("slide",400);require(e.transition,"Bundled slide transition unavailable");
+ const int settledBefore=testFitFrames.load();auto *slideFrom=e.scene;
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280,720,white)),e.normalizeLayer(synthetic(640,360,red,"corner","br",0.4))},false,true);
+ require(e.scene!=slideFrom,"An animated scene change must compose on its own canvas");
+ auto *sharedSource=e.layers[0].source;
+ Sleep(900);testStage=3;Sleep(500);
+ require(testCornerFrames>5 && testFitFrames.load()==settledBefore,"The canvas must settle on the new scene after the animation");
+ e.applyLayers(QJsonArray{e.normalizeLayer(synthetic(1280,720,white)),e.normalizeLayer(synthetic(640,360,red,"corner","tl",0.4))},false,true);
+ require(e.layers[0].source==sharedSource,"A source shared by both scenes must not be reopened during the change");
+ { auto *encoderSettings=e.videoEncoderSettings();
+   require(obs_data_get_int(encoderSettings,"keyint_sec")==1 && QString::fromUtf8(obs_data_get_string(encoderSettings,"tune"))=="zerolatency" && obs_data_get_int(encoderSettings,"bf")==0 && QString::fromUtf8(obs_data_get_string(encoderSettings,"rate_control"))=="CBR" && obs_data_get_int(encoderSettings,"bitrate")==2500,"Publishing must stay low latency at constant bitrate");
+   obs_data_release(encoderSettings); }
  obs_remove_raw_video_callback(testFrame, nullptr);
  e.videoEncoder = obs_video_encoder_create("obs_x264", "Synthetic encoder", nullptr, nullptr); e.audioEncoder = obs_audio_encoder_create("ffmpeg_aac", "Synthetic audio encoder", nullptr, 0, nullptr);
  require(e.videoEncoder && e.audioEncoder, "Bundled H264/AAC encoders unavailable");
- send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"validEmptyFrames",testEmptyFrames.load()}, {"previewGeometryChecks",4}, {"sourceReadinessChecks",3}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",9}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
+ send({{"ok", true}, {"test", "real-libobs-composition"}, {"frames", testFrames.load()}, {"validFitFrames", testFitFrames.load()}, {"validPauseFrames",testPauseFrames.load()}, {"validOverlayFrames",testOverlayFrames.load()}, {"validCornerFrames",testCornerFrames.load()}, {"validHiddenFrames",testHiddenFrames.load()}, {"validEmptyFrames",testEmptyFrames.load()}, {"validHeldFrames",testHeldCaptureFrames.load()}, {"validSceneChangeFrames",testSwitchFrames.load()}, {"previewGeometryChecks",4}, {"sourceReadinessChecks",3}, {"heldFrameChecks",6}, {"sceneChangeChecks",7}, {"publishLatencyChecks",5}, {"pauseRestoresMute",true}, {"sourceSwitchAndAudioChecks",7}, {"layerCompositionChecks",9}, {"audioMeterChecks",meterChecks}, {"reconnectionStateChecks",5}, {"h264AndAacAvailable", true}, {"networkUsed", false}, {"physicalCaptureUsed", false}}); return 0;
 }
 }
 int main(int argc, char **argv) {

@@ -33,6 +33,16 @@ const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'];
 const LAYER_KINDS = ['camera', 'window', 'display', 'game', 'image', 'text'];
 const CAPTURE_KINDS = ['camera', 'window', 'display', 'game'];
 const CORNERS = ['tl', 'tr', 'bl', 'br'];
+const TRANSITION_STYLES = ['slide', 'fade', 'cut'];
+const SCENE_ID = /^[A-Za-z0-9_-]{1,40}$/;
+/** How one scene gives way to the next. Duration is bounded so a scene change always completes. */
+function transitionInput(value) {
+  if (value == null) return {style: 'slide', durationMs: 350};
+  if (typeof value !== 'object' || Array.isArray(value) || !TRANSITION_STYLES.includes(value.style)) throw new Error('Transição inválida.');
+  const durationMs = Number.isFinite(value.durationMs) ? Math.round(value.durationMs) : 350;
+  if (durationMs < 0 || durationMs > 2000) throw new Error('Duração da transição inválida.');
+  return {style: value.style, durationMs};
+}
 function cleanText(value, max, message) {
   if (typeof value !== 'string' || value.length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error(message);
   return value;
@@ -68,6 +78,12 @@ function prepareInput(value, allowedFiles = new Set()) {
     if (value[key] != null && (typeof value[key] !== 'string' || value[key].length > 4096 || /[\x00-\x1f]/.test(value[key]))) throw new Error('Equipamento inválido.');
     result[key] = value[key] || '';
   }
+  // The scene identity tells the engine that this is another scene, not an edit of the one on air.
+  if (value.sceneId != null) {
+    if (typeof value.sceneId !== 'string' || !SCENE_ID.test(value.sceneId)) throw new Error('Cena inválida.');
+    result.sceneId = value.sceneId;
+  }
+  result.transition = transitionInput(value.transition);
   if (Array.isArray(value.layers)) {
     result.layers = layersInput(value.layers, allowedFiles);
     const primary = result.layers.find(layer => CAPTURE_KINDS.includes(layer.kind));
@@ -83,4 +99,4 @@ function audioInput(value) {
   if (!value || !['microphone','desktop'].includes(value.channel) || !Number.isFinite(value.volume) || value.volume < 0 || value.volume > 100) throw new Error('Volume inválido.');
   return {channel:value.channel,volume:value.volume};
 }
-module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, layerInput, layersInput, imageFileAllowed, IMAGE_EXTENSIONS, LAYER_KINDS, CAPTURE_KINDS, uuid };
+module.exports = { ORIGIN, managerRoute, verificationURL, prepareInput, audioInput, layerInput, layersInput, transitionInput, imageFileAllowed, IMAGE_EXTENSIONS, LAYER_KINDS, CAPTURE_KINDS, TRANSITION_STYLES, uuid };

@@ -68,7 +68,7 @@ async function endSession(){endRequested=true;epoch++;await stopLocal();if(activ
 async function mediaEvent(value){
   if(value.event==='audio-levels'){if(prepared){audioMeters=normalizeAudioMeters(value.channels);if(win&&!win.isDestroyed())win.webContents.send('studio:audio-levels',audioMeters);}return;}
   if(value.event!=='status')return;
-  mediaStatus={state:value.state,width:value.width,height:value.height,fps:value.fps,totalBytes:value.totalBytes,droppedFrames:value.droppedFrames,layers:Array.isArray(value.layers)?value.layers.map(layer=>({kind:String(layer?.kind??''),ready:layer?.ready===true,visible:layer?.visible!==false})):[]};
+  mediaStatus={state:value.state,width:value.width,height:value.height,fps:value.fps,totalBytes:value.totalBytes,droppedFrames:value.droppedFrames,layers:Array.isArray(value.layers)?value.layers.map(layer=>({kind:String(layer?.kind??''),ready:layer?.ready===true,holding:layer?.holding===true,visible:layer?.visible!==false})):[]};
   // A failed TLS/network/encoder start is terminal. A recoverable reconnect is not.
   if(transmitting&&Number.isInteger(value.stopCode)&&['ready','idle'].includes(value.state)){
     try{await endSession();}catch{notice='O envio foi interrompido. Vamos tentar finalizar a sessão no servidor novamente.';}

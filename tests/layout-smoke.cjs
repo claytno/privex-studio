@@ -97,7 +97,14 @@ app.whenReady().then(async()=>{let win;try{
  await clickText('button','Abrir prévia');await delay(100);state={...state,prepared:true};win.webContents.send('studio:state',state);await delay(100);
  state={...state,studio:{session:{id,status:'reserved',managed_by_device:true}}};win.webContents.send('studio:state',state);await delay(150);
  await click('[aria-label="Nova cena"]');await delay(100);assert.equal(await js("document.querySelectorAll('.scene-list li').length"),2);
- await delay(600);assert.equal(last('layout.save').payload.scenes.length,2);assert.equal(last('layout.save').payload.scenes[1].layers.length,3,'A new scene starts as a copy of the current one');
+ await delay(600);assert.equal(last('layout.save').payload.scenes.length,2);assert.equal(last('layout.save').payload.scenes[1].layers.length,0,'A new scene starts empty: two scenes never share what the other shows');
+ assert.ok(last('prepare').payload.sceneId,'The scene identity reaches the engine so it can animate the change');
+ assert.deepEqual(last('prepare').payload.transition,{style:'slide',durationMs:350},'The scene change carries the chosen animation');
+ await clickText('.scene-button','Principal');await delay(300);await click('[aria-label="Duplicar cena"]');await delay(700);
+ const copied=last('layout.save').payload;assert.equal(copied.scenes.length,3);assert.equal(copied.scenes[2].layers.length,3,'Duplicating copies the sources of that scene, on purpose');
+ await setValue('[aria-label="Transição entre cenas"]','fade');await delay(600);
+ assert.equal(last('prepare').payload.transition.style,'fade','Choosing another animation is applied to the engine');
+ await setValue('[aria-label="Transição entre cenas"]','slide');await delay(600);
  await clickText('.scene-button','Principal');await delay(600);assert.equal(await js("document.querySelector('.scene-list li.is-active').textContent.includes('Principal')"),true);
  await js("[...document.querySelectorAll('[role=tab]')].find(b=>b.textContent.includes('Interações')).click()");await delay(400);
  const layouts=[];

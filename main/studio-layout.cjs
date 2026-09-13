@@ -3,7 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {randomUUID} = require('node:crypto');
-const {layerInput, imageFileAllowed} = require('./security.cjs');
+const {layerInput, transitionInput, imageFileAllowed} = require('./security.cjs');
 
 const MAX_SCENES = 12, MAX_LAYERS = 6, MAX_FILE = 262144, MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const idPattern = /^[A-Za-z0-9_-]{1,40}$/;
@@ -17,7 +17,7 @@ function cleanDevice(value) {
 }
 function defaultLayout() {
   // fresh: nothing saved yet, so the renderer may suggest the first camera and microphone.
-  return {version: 1, scenes: [{id: 'principal', name: 'Principal', layers: []}], activeScene: 'principal', microphoneId: '', desktopId: '', portrait: false, fresh: true};
+  return {version: 1, scenes: [{id: 'principal', name: 'Principal', layers: []}], activeScene: 'principal', microphoneId: '', desktopId: '', portrait: false, transition: {style: 'slide', durationMs: 350}, fresh: true};
 }
 /** Validates a layout coming from the renderer. Unknown keys are dropped; invalid layers throw so the user sees why. */
 function layoutInput(value, allowedFiles) {
@@ -30,7 +30,7 @@ function layoutInput(value, allowedFiles) {
     return {id: scene.id, name: cleanName(scene.name, `Cena ${index + 1}`), layers: scene.layers.map(layer => layerInput(layer, allowedFiles))};
   });
   const activeScene = ids.has(value.activeScene) ? value.activeScene : scenes[0].id;
-  return {version: 1, scenes, activeScene, microphoneId: cleanDevice(value.microphoneId), desktopId: cleanDevice(value.desktopId), portrait: value.portrait === true};
+  return {version: 1, scenes, activeScene, microphoneId: cleanDevice(value.microphoneId), desktopId: cleanDevice(value.desktopId), portrait: value.portrait === true, transition: transitionInput(value.transition)};
 }
 async function imageUsable(file) {
   if (!imageFileAllowed(file)) return false;
@@ -56,7 +56,8 @@ async function loadLayout(file, allowedFiles) {
     scenes.push({id: scene.id, name: cleanName(scene.name, `Cena ${index + 1}`), layers});
   }
   if (!scenes.length) return defaultLayout();
-  return {version: 1, scenes, activeScene: scenes.some(s => s.id === parsed.activeScene) ? parsed.activeScene : scenes[0].id, microphoneId: cleanDevice(parsed.microphoneId), desktopId: cleanDevice(parsed.desktopId), portrait: parsed.portrait === true};
+  let transition; try { transition = transitionInput(parsed.transition); } catch { transition = {style: 'slide', durationMs: 350}; }
+  return {version: 1, scenes, activeScene: scenes.some(s => s.id === parsed.activeScene) ? parsed.activeScene : scenes[0].id, microphoneId: cleanDevice(parsed.microphoneId), desktopId: cleanDevice(parsed.desktopId), portrait: parsed.portrait === true, transition};
 }
 async function saveLayout(file, layout) {
   await fs.mkdir(path.dirname(file), {recursive: true});

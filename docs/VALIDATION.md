@@ -211,3 +211,38 @@ downloaded signed-installer test remain necessary before a signed public release
   beta.11; HTTPS download hash matched.
 - Not validated: a real broadcast being renamed mid-air with viewers attached,
   and the cue heard during an actual live.
+
+## beta.13 held frame, separate scenes and lower latency (2026-09-13)
+
+- Held frame: a new libobs filter (`privex_hold_frame`) caches the last rendered
+  frame of a game or window capture and keeps drawing it while the source
+  reports no size, which is what happens on alt-tab, on minimize and when a game
+  stops drawing. The self-test proves it with pixels on the published mix: a
+  synthetic capture that stops delivering keeps its picture on the canvas
+  (validHeldFrames 27 while stopped) and is reported as `holding`, so the source
+  list shows "quadro congelado" instead of a silent black frame. The filter is
+  never attached to a camera, so a frozen face cannot stand in for a person.
+- Separate scenes: a scene change now composes a new canvas and hands it to an
+  obs-transitions source (slide, fade or cut, 0-2000 ms), instead of editing the
+  composition on air into the next one. The self-test asserts the new canvas is a
+  different scene object, that the change reaches the published pixels, that a
+  source shared by both scenes is not reopened, and that an injected failure
+  keeps the previous scene on air while publishing continues. The interval slate
+  and the public goal moved to their own output channels (3 and 4) so they stay
+  above the scene through a change; the preview now renders the published mix.
+- A new scene starts empty and a separate button duplicates the current one.
+- Publishing latency: the client encoder uses tune=zerolatency, no B-frames and a
+  keyframe every second (about 0.6 s less between this computer and the server).
+  Measured cost at the ingest on a 20 s synthetic clip at 2500 kbps: SSIM 0.9903
+  against 0.9943. The audience picture is produced by the server re-encode, whose
+  settings did not change.
+- 80 Node tests, engine self-test (including heldFrameChecks 6, sceneChangeChecks
+  7, publishLatencyChecks 5), protocol test, layout smoke at four window sizes,
+  UI smoke, native preview smoke (real window capture through the new filter) and
+  the source audit all pass. Packaged app starts against a throwaway profile.
+- Installer 307548737 bytes, SHA-256
+  dd2e256cec7f85bd151534a1da42943dfc81b767311de7c4414901adbad179a0, unsigned
+  beta, published at the immutable URL; the signed manifest offers beta.13 to
+  beta.10, beta.11 and beta.12 and not to itself; HTTPS download hash matched.
+- Not validated: a real game alt-tabbed on this server, which has no game GPU,
+  and the end-to-end delay measured with a real broadcast and a real viewer.

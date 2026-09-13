@@ -19,6 +19,18 @@ test('missing or corrupt layout files fall back to a fresh default without throw
   assert.equal((await loadLayout(path.join(dir, 'huge.json'), new Set())).scenes.length, 1);
 });
 
+test('the transition choice is remembered for this computer and repaired when the file is damaged', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'privex-transition-'));
+  const file = path.join(directory, 'studio-layout.json');
+  const allowed = new Set();
+  await saveLayout(file, layoutInput({scenes: [{id: 'principal', name: 'Principal', layers: []}], activeScene: 'principal', transition: {style: 'cut', durationMs: 0}}, allowed));
+  assert.deepEqual((await loadLayout(file, allowed)).transition, {style: 'cut', durationMs: 0});
+  await fs.writeFile(file, JSON.stringify({version: 1, scenes: [{id: 'principal', name: 'Principal', layers: []}], activeScene: 'principal', transition: {style: 'stinger', durationMs: 99999}}));
+  assert.deepEqual((await loadLayout(file, allowed)).transition, {style: 'slide', durationMs: 350}, 'A damaged choice falls back instead of refusing the layout');
+  assert.throws(() => layoutInput({scenes: [{id: 'principal', name: 'P', layers: []}], activeScene: 'principal', transition: {style: 'wipe'}}, allowed), /Transição/);
+  await fs.rm(directory, {recursive: true, force: true});
+});
+
 test('saved layouts round-trip and drop layers whose image disappeared instead of substituting', async () => {
   const dir = await scratch(), file = path.join(dir, 'studio-layout.json'), image = path.join(dir, 'logo.png');
   await fs.writeFile(image, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
@@ -40,6 +52,20 @@ test('renderer layouts are validated: ids, counts, kinds and image allowlist', (
   const ok = layoutInput({scenes: [{id: 'a', layers: [{kind: 'image', file: 'C:\\pictures\\ok.png', fit: 'fill', size: 9, visible: false, name: 'Logo'}]}]}, allowed);
   assert.deepEqual(ok.scenes[0].layers[0], {kind: 'image', fit: 'fill', corner: 'br', size: 0.6, visible: false, name: 'Logo', file: 'C:\\pictures\\ok.png'});
   assert.equal(defaultLayout().scenes[0].id, 'principal');
+});
+
+test('the scene identity and its transition are bounded before they reach the engine', () => {
+  const applied = prepareInput({sceneId: 'cena-l2-abc', transition: {style: 'fade', durationMs: 200}, layers: [{kind: 'display', id: 'm1'}]});
+  assert.equal(applied.sceneId, 'cena-l2-abc');
+  assert.deepEqual(applied.transition, {style: 'fade', durationMs: 200});
+  // Without a choice the engine still receives one, so a scene change is never silently instant.
+  assert.deepEqual(prepareInput({layers: []}).transition, {style: 'slide', durationMs: 350});
+  assert.equal('sceneId' in prepareInput({layers: []}), false, 'No scene identity means an edit of the scene on air');
+  assert.throws(() => prepareInput({layers: [], sceneId: 'cena com espaço'}), /Cena/);
+  assert.throws(() => prepareInput({layers: [], sceneId: 'x'.repeat(41)}), /Cena/);
+  assert.throws(() => prepareInput({layers: [], transition: {style: 'stinger'}}), /Transição/);
+  assert.throws(() => prepareInput({layers: [], transition: {style: 'slide', durationMs: 9000}}), /Duração/);
+  assert.throws(() => prepareInput({layers: [], transition: {style: 'slide', durationMs: -1}}), /Duração/);
 });
 
 test('prepare input accepts explicit layers and keeps the single-source form for older callers', () => {

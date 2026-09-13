@@ -39,7 +39,7 @@ $moduleTarget = Join-Path $enginePackage 'obs-plugins\64bit'
 $dataTarget = Join-Path $enginePackage 'data\obs-plugins'
 New-Item -ItemType Directory -Force $moduleTarget,$dataTarget | Out-Null
 Copy-Item -LiteralPath (Join-Path $runtime 'data\libobs') -Destination (Join-Path $enginePackage 'data') -Recurse -Force
-$modules = @('win-dshow','win-wasapi','win-capture','obs-x264','obs-ffmpeg','obs-outputs','rtmp-services','image-source','obs-text')
+$modules = @('win-dshow','win-wasapi','win-capture','obs-x264','obs-ffmpeg','obs-outputs','rtmp-services','image-source','obs-text','obs-transitions')
 foreach ($module in $modules) {
  Copy-Item -LiteralPath (Join-Path $runtime "obs-plugins\64bit\$module.dll") -Destination $moduleTarget -Force
  $moduleData = Join-Path $runtime "data\obs-plugins\$module"
