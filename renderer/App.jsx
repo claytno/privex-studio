@@ -1,6 +1,6 @@
 import React,{useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
 import {createRoot} from 'react-dom/client';
-import {Camera,Mic,Monitor,Radio,LogOut,MessageSquare,Gift,ArrowRight,ShieldCheck,RefreshCw,Square,Video,VolumeX,Image,Type,Eye,EyeOff,ChevronUp,ChevronDown,Trash2,Plus,Layers,AppWindow,Film,Pause,Play,Pencil} from 'lucide-react';
+import {Camera,Mic,Monitor,Radio,LogOut,MessageSquare,Gift,ArrowRight,ShieldCheck,RefreshCw,Square,Video,VolumeX,Image,Type,Eye,EyeOff,ChevronUp,ChevronDown,Trash2,Plus,Layers,AppWindow,Film,Pause,Play,Pencil,X,Check} from 'lucide-react';
 import LiveChatPanel from "../shared/pages/live/LiveChatPanel.jsx";
 import LiveCommerceStudio from "../shared/pages/live/LiveCommerceStudio.jsx";
 import {invoke} from "./bridge.js";import {setUser} from "./auth.js";import {setSession} from "./adapter.js";
@@ -37,9 +37,10 @@ const statusNames={waiting:'Na fila',reserved:'Vaga disponível',starting:'Conec
 const hiddenBounds={x:0,y:0,width:0,height:0};
 function previewBounds(element){
   if(!element||document.hidden)return hiddenBounds;
-  const obscured=[...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], dialog[open], [data-radix-popper-content-wrapper]')].some(node=>node.getClientRects().length&&getComputedStyle(node).visibility!=='hidden'&&node.getAttribute('aria-hidden')!=='true');
-  if(obscured)return hiddenBounds;
   const rect=element.getBoundingClientRect();
+  const covers=node=>{const box=node.getBoundingClientRect();return box.width>0&&box.height>0&&box.left<rect.right-.5&&box.right>rect.left+.5&&box.top<rect.bottom-.5&&box.bottom>rect.top+.5;};
+  const obscured=[...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], dialog[open], [data-radix-popper-content-wrapper]')].some(node=>node.getClientRects().length&&getComputedStyle(node).visibility!=='hidden'&&node.getAttribute('aria-hidden')!=='true'&&covers(node));
+  if(obscured)return hiddenBounds;
   if(rect.width<1||rect.height<1||rect.left<0||rect.top<0||rect.right>innerWidth+.5||rect.bottom>innerHeight+.5)return hiddenBounds;
   for(let node=element.parentElement;node&&node!==document.body;node=node.parentElement){
     const style=getComputedStyle(node),clip=node.getBoundingClientRect();
@@ -60,7 +61,7 @@ function UpdatePreferences({state,busy,run}){
 function App(){
   const [state,setState]=useState({}),[error,setError]=useState(''),[title,setTitle]=useState(''),[mic,setMic]=useState(''),[desktop,setDesktop]=useState(''),[micLevel,setMicLevel]=useState(100),[desktopLevel,setDesktopLevel]=useState(100),[deviceError,setDeviceError]=useState(''),[portrait,setPortrait]=useState(false),[devices,setDevices]=useState(null),[tab,setTab]=useState('chat'),[muted,setMuted]=useState(false),[localBusy,setLocalBusy]=useState(false);
   const [scenes,setScenes]=useState([]),[activeScene,setActiveScene]=useState(''),[selected,setSelected]=useState(null),[adding,setAdding]=useState(false),[renaming,setRenaming]=useState(null),[applying,setApplying]=useState(false);
-  const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),applied=useRef(''),failed=useRef(''),rate=useRef({bytes:0,at:0,kbps:0});
+  const preview=useRef(null),deviceScan=useRef(false),initialDevices=useRef({camera:false,microphone:false}),volumeCommit=useRef(false),audioState=useRef({microphone:100,desktop:100}),layoutLoaded=useRef(false),layoutFresh=useRef(false),applied=useRef(''),failed=useRef(''),autoOpened=useRef(false),rate=useRef({bytes:0,at:0,kbps:0});
   const session=state.studio?.session;const owned=session?.managed_by_device;const displayStatus=session?.status==='live'&&!session.media_ready?'starting':session?.status;const busy=localBusy||state.busy;const sessionActive=!!session&&['waiting','reserved','starting','live','reconnecting','ending'].includes(session.status);const active=owned&&sessionActive;const displayPortrait=state.prepared?(state.canvasPortrait??portrait):portrait;
   const update=value=>{audioState.current={microphone:value.microphoneVolume??100,desktop:value.desktopVolume??100};setUser(value.user);setSession(value.studio?.session?.managed_by_device?value.studio.session.id:null);setMuted(!!value.muted);setState(value);};
   useEffect(()=>{invoke('snapshot').then(update);const cleanup=window.privex.onState(update);const timer=setInterval(()=>invoke('snapshot').then(update).catch(()=>{}),5000);return()=>{cleanup();clearInterval(timer);};},[]);
@@ -117,6 +118,12 @@ function App(){
     const timer=setTimeout(()=>{void apply();},350);return()=>clearTimeout(timer);
   },[composition,state.prepared,canApply,busy,applying]);
   useEffect(()=>{if(!state.prepared)applied.current='';},[state.prepared]);
+  // Once a person has used the preview on this computer it opens by itself on the next launches, before any live.
+  useEffect(()=>{
+    if(autoOpened.current||state.prepared||!layoutLoaded.current||layoutFresh.current||!devices||!canApply||busy||applying||state.transmitting||sessionActive)return;
+    autoOpened.current=true;void apply();
+  },[devices,canApply,busy,applying,state.prepared,state.transmitting,sessionActive]);
+  async function closePreview(){autoOpened.current=true;await run('preview.close');}
   useEffect(()=>{
     if(!layoutLoaded.current||!scenes.length)return;
     const timer=setTimeout(()=>{void invoke('layout.save',{scenes:scenes.map(item=>({id:item.id,name:item.name,layers:item.layers.map(persistLayer)})),activeScene:scene?.id||scenes[0].id,microphoneId:mic,desktopId:desktop,portrait}).catch(()=>{});},600);
@@ -173,6 +180,7 @@ function App(){
       <div className="preview-shell"><div className="preview-stage"><div ref={preview} className={displayPortrait?'preview is-portrait':'preview'}>{!state.prepared&&<div className="preview-empty"><Video size={34}/><h2>{layers.length?'Prévia desligada':'Monte sua cena'}</h2><p>{previewMessage}</p></div>}</div></div>
         <div className="preview-caption"><span>{state.transmitting?'AO VIVO · este é exatamente o vídeo enviado':state.prepared?'PRÉVIA LOCAL · ninguém está assistindo ainda':'PRÉVIA DESLIGADA · nenhuma captura ativa'}</span><span className="format-badge">{displayPortrait?'9:16 vertical':'16:9 horizontal'}</span></div></div>
       <div className="toolbar">
+        {state.prepared&&!sessionActive&&<button className="secondary" disabled={busy} onClick={closePreview}><Square size={14}/> Fechar prévia</button>}
         {state.prepared?<span className={'apply-state'+(applying?' is-working':'')} role="status">{applying?'Aplicando…':!layers.length?'Adicione uma fonte':inSync?'Cena aplicada':missingLayers.length||missingMic||missingDesktop?'Equipamento desconectado':'Aplicando alterações…'}</span>:<button className="primary" disabled={busy||!canApply} onClick={apply}><Play size={16}/> Abrir prévia</button>}
         <label className="inline-field">Formato<select aria-label="Formato" disabled={busy||state.transmitting} value={portrait?'portrait':'landscape'} onChange={e=>setPortrait(e.target.value==='portrait')}><option value="landscape">16:9 horizontal</option><option value="portrait">9:16 vertical</option></select></label>
         <button className={state.sceneMode==='pause'?'muted-button':'secondary'} disabled={!state.prepared||busy} onClick={()=>run('scene',{mode:state.sceneMode==='pause'?'live':'pause'})}>{state.sceneMode==='pause'?<><Play size={15}/> Voltar da pausa</>:<><Pause size={15}/> Pausa</>}</button>
@@ -195,15 +203,6 @@ function App(){
             <button className="icon-button" aria-label="Trazer para frente" disabled={index===0} onClick={()=>moveLayer(layer,-1)}><ChevronUp size={14}/></button>
             <button className="icon-button" aria-label="Enviar para trás" disabled={index===layers.length-1} onClick={()=>moveLayer(layer,1)}><ChevronDown size={14}/></button>
             <button className="icon-button" aria-label="Remover fonte" onClick={()=>removeLayer(layer)}><Trash2 size={14}/></button></li>;})}</ul>:<p className="dock-empty">Nenhuma fonte ainda. Adicione a câmera, uma janela, a tela, uma imagem ou um texto. A primeira da lista aparece na frente.</p>}
-          {selectedLayer&&<div className="layer-props" aria-label="Ajustes da fonte">
-            {CAPTURE.includes(selectedLayer.kind)&&<label>{KIND_LABELS[selectedLayer.kind]}<select aria-label={'Equipamento da fonte'} disabled={!devices} value={selectedLayer.id||''} onChange={e=>patchLayer(selectedLayer.uid,{id:e.target.value})}><option value="">Escolha um equipamento</option>{layerMissing(selectedLayer)&&<option value={selectedLayer.id}>Equipamento desconectado</option>}{options(listFor(selectedLayer.kind))}</select></label>}
-            {selectedLayer.kind==='text'&&<label>Texto<input maxLength={120} value={selectedLayer.text||''} onChange={e=>patchLayer(selectedLayer.uid,{text:e.target.value})}/></label>}
-            {selectedLayer.kind==='image'&&<div className="image-row"><span title={selectedLayer.file}>{selectedLayer.fileName}</span><button className="text-button" disabled={busy} onClick={async()=>{const picked=await run('image.pick');if(picked)patchLayer(selectedLayer.uid,{file:picked.file,fileName:picked.name});}}>Trocar imagem</button></div>}
-            <label>Nome<input maxLength={40} placeholder={layerLabel(selectedLayer)} value={selectedLayer.name||''} onChange={e=>patchLayer(selectedLayer.uid,{name:e.target.value})}/></label>
-            <label>Posição<select aria-label="Posição da fonte" value={selectedLayer.fit||'fit'} onChange={e=>patchLayer(selectedLayer.uid,{fit:e.target.value})}><option value="fit">Tela inteira, imagem completa</option><option value="fill">Preencher, cortando as bordas</option><option value="corner">Em um canto (sobre as outras)</option></select></label>
-            {selectedLayer.fit==='corner'&&<div className="corner-row"><div className="corner-grid" role="group" aria-label="Canto">{[['tl','Canto superior esquerdo'],['tr','Canto superior direito'],['bl','Canto inferior esquerdo'],['br','Canto inferior direito']].map(([corner,label])=><button key={corner} aria-label={label} aria-pressed={selectedLayer.corner===corner} className={selectedLayer.corner===corner?'is-active':''} onClick={()=>patchLayer(selectedLayer.uid,{corner})}/>)}</div><label className="size-field">Tamanho <strong>{Math.round((selectedLayer.size||.3)*100)}%</strong><input aria-label="Tamanho da fonte no canto" type="range" min="15" max="60" step="5" value={Math.round((selectedLayer.size||.3)*100)} onChange={e=>patchLayer(selectedLayer.uid,{size:Number(e.target.value)/100})}/></label></div>}
-            {selectedLayer.kind==='display'&&<p className="fine">Tudo nessa tela pode aparecer, inclusive este gerenciador. Prefira compartilhar uma janela.</p>}
-          </div>}
         </section>
         <section className="dock dock-audio" aria-label="Áudio">
           <header><h3><Mic size={14}/> Áudio</h3></header>
@@ -218,6 +217,19 @@ function App(){
           {desktop&&<p className="dock-hint">O áudio do computador inclui outros apps e notificações. Use fones e silencie o player da sua própria live para evitar eco.</p>}
         </section>
       </div>
+      {selectedLayer&&(()=>{const Icon=KIND_ICONS[selectedLayer.kind];return <><div className="sheet-backdrop" onClick={()=>setSelected(null)}/><div className="layer-dialog" role="dialog" aria-modal="true" aria-label="Ajustes da fonte" onKeyDown={e=>{if(e.key==='Escape')setSelected(null);}}>
+        <header><h3><Icon size={15}/> {layerLabel(selectedLayer)}</h3><span className="dock-hint">{KIND_LABELS[selectedLayer.kind]} · as mudanças valem na hora</span><button className="icon-button" aria-label="Fechar ajustes" onClick={()=>setSelected(null)}><X size={16}/></button></header>
+        <div className="layer-props">
+            {CAPTURE.includes(selectedLayer.kind)&&<label>{KIND_LABELS[selectedLayer.kind]}<select aria-label={'Equipamento da fonte'} disabled={!devices} value={selectedLayer.id||''} onChange={e=>patchLayer(selectedLayer.uid,{id:e.target.value})}><option value="">Escolha um equipamento</option>{layerMissing(selectedLayer)&&<option value={selectedLayer.id}>Equipamento desconectado</option>}{options(listFor(selectedLayer.kind))}</select></label>}
+            {selectedLayer.kind==='text'&&<label>Texto<input maxLength={120} value={selectedLayer.text||''} onChange={e=>patchLayer(selectedLayer.uid,{text:e.target.value})}/></label>}
+            {selectedLayer.kind==='image'&&<div className="image-row"><span title={selectedLayer.file}>{selectedLayer.fileName}</span><button className="text-button" disabled={busy} onClick={async()=>{const picked=await run('image.pick');if(picked)patchLayer(selectedLayer.uid,{file:picked.file,fileName:picked.name});}}>Trocar imagem</button></div>}
+            <label>Nome<input maxLength={40} placeholder={layerLabel(selectedLayer)} value={selectedLayer.name||''} onChange={e=>patchLayer(selectedLayer.uid,{name:e.target.value})}/></label>
+            <label>Posição<select aria-label="Posição da fonte" value={selectedLayer.fit||'fit'} onChange={e=>patchLayer(selectedLayer.uid,{fit:e.target.value})}><option value="fit">Tela inteira, imagem completa</option><option value="fill">Preencher, cortando as bordas</option><option value="corner">Em um canto (sobre as outras)</option></select></label>
+            {selectedLayer.fit==='corner'&&<div className="corner-row"><div className="corner-grid" role="group" aria-label="Canto">{[['tl','Canto superior esquerdo'],['tr','Canto superior direito'],['bl','Canto inferior esquerdo'],['br','Canto inferior direito']].map(([corner,label])=><button key={corner} aria-label={label} aria-pressed={selectedLayer.corner===corner} className={selectedLayer.corner===corner?'is-active':''} onClick={()=>patchLayer(selectedLayer.uid,{corner})}/>)}</div><label className="size-field">Tamanho <strong>{Math.round((selectedLayer.size||.3)*100)}%</strong><input aria-label="Tamanho da fonte no canto" type="range" min="15" max="60" step="5" value={Math.round((selectedLayer.size||.3)*100)} onChange={e=>patchLayer(selectedLayer.uid,{size:Number(e.target.value)/100})}/></label></div>}
+            {selectedLayer.kind==='display'&&<p className="fine">Tudo nessa tela pode aparecer, inclusive este gerenciador. Prefira compartilhar uma janela.</p>}
+        </div>
+        <footer><button className="secondary" onClick={()=>{removeLayer(selectedLayer);}}><Trash2 size={14}/> Remover fonte</button><button className="primary" autoFocus onClick={()=>setSelected(null)}><Check size={15}/> Concluir</button></footer>
+      </div></>;})()}
     </section><aside className="manager"><div className="manager-heading"><h2>Seu gerenciador</h2><p>Conectado à mesma live do site</p></div><div className="tabbar" role="tablist" aria-label="Gerenciador"><button role="tab" aria-selected={tab==='chat'} onClick={()=>setTab('chat')}><MessageSquare size={17}/> Chat</button><button role="tab" aria-selected={tab==='commerce'} onClick={()=>setTab('commerce')}><Gift size={17}/> Interações</button></div><div className="manager-content" role="tabpanel">{owned?<React.Fragment key={session.id}>{tab==='chat'?<LiveChatPanel sessionId={session.id}/>:<><Revenue sessionId={session.id}/><LiveCommerceStudio sessionId={session.id}/></>}</React.Fragment>:<div className="manager-empty"><MessageSquare size={30}/><h3>Todo mundo por perto</h3><p>Ao abrir uma sessão, seu chat, metas, roleta e presentes estarão aqui.</p><p className="fine">As interações usam as mesmas regras e registros do site.</p></div>}</div><UpdatePreferences state={state} busy={busy} run={run}/></aside></div>
     <footer className="controlbar"><div className="control-status"><span className="signal"><i/>{statusNames[displayStatus]||'Pronta para preparar'}</span><p>{session?.status==='waiting'?`Posição na fila: ${session.queue_position||'consultando'}`:state.transmitting?`${rate.current.kbps} kbps · ${state.mediaStatus?.droppedFrames||0} quadros perdidos`:'Privex Studio '+state.version+' · 720p · 30 fps'}</p></div>
       <label className="title-field"><span className="sr-only">Título da live</span><input aria-label="Título da live" value={title} onChange={e=>setTitle(e.target.value)} maxLength={100} disabled={busy||active} placeholder="Título da live · o que vamos fazer hoje?"/></label>

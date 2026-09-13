@@ -459,3 +459,13 @@ test('saved layouts are validated and persisted through the layout module only',
  await assert.rejects(subject.command('layout.save',{scenes:[{id:'principal',layers:[{kind:'image',file:'C:\pictures\never-picked.png'}]}]}),/seletor/);
  assert.equal(subject.snapshot().layout.activeScene,'pausa','a rejected layout leaves the previous one untouched');
 });
+
+test('closing the preview releases capture only outside a live',async()=>{
+ const {subject,engineCalls}=fixture();await subject.command('prepare',equipment);
+ subject.configure({studio:ownSession('live'),transmitting:true});
+ await assert.rejects(subject.command('preview.close'),/Encerre a live/);assert.equal(subject.state().prepared,true);
+ subject.configure({studio:{session:null},transmitting:false});
+ await subject.command('preview.close');
+ assert.equal(subject.state().prepared,false);assert.equal(engineCalls.at(-1).name,'stop');
+ await subject.command('preview.close');assert.equal(engineCalls.filter(c=>c.name==='stop').length,1,'closing an already closed preview is a no-op');
+});
