@@ -138,3 +138,25 @@ downloaded signed-installer test remain necessary before a signed public release
   beta.6 and beta.7 and reports beta.8 as current; HTTPS download hash matched.
 - Not validated: an actual game hooked on this server (no GPU game available),
   anticheat behaviour, WGC on Windows 10 (yellow border), physical camera.
+
+## beta.10 preview restoration and publication (2026-09-13)
+
+- Real-engine probe on this machine (DPI 100%, zoom 1 and 1.25, maximized
+  window) could not reproduce the beta.9 invisible preview; the beta.9 CSS
+  viewport conversion was nevertheless the only preview-path change, unverified
+  on user hardware, so the beta.8 placement (single conversion in the main
+  process, physical bounds checked by the engine) is restored. Bounds failures
+  are now displayed in the interface for diagnosis.
+- 77 Node tests pass (preview conversion applied once, out-of-window bounds
+  rejected, zero bounds hide the child). Layout smoke: the settings sheet sits
+  below the preview with all fields reachable; UI smoke, protocol test (engine
+  rebuilt as beta.10, geometry checks retained) and native preview smoke pass;
+  source audit passes.
+- Installer 306673060 bytes, SHA-256
+  1489d565b3398073ba02fd9d01478552a334075e38872d61240d1b31b5191814, unsigned
+  beta. Packaged app started against a throwaway profile. Published at the
+  immutable URL; signed latest.json offers beta.10 to beta.8 and beta.9 and
+  reports beta.10 as current; full HTTPS download hash matched.
+- Not validated: the user's own machine and DPI; the actual cause of the beta.9
+  report remains inferred, so the visible bounds error message is the next
+  diagnostic step if it recurs.

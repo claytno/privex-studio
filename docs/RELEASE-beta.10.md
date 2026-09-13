@@ -18,3 +18,7 @@ inutilizável.
 O restante da beta.9 permanece: cena vazia com quadro preto, sincronização
 serializada da cena, troca transacional de fontes e preparação das interações
 antes da live (exige o backend com `commerce-preset`).
+
+Publicado em 2026-09-13 em `downloads/privex-studio/0.2.0-beta.10/` (306673060
+bytes, SHA-256 `1489d565b3398073ba02fd9d01478552a334075e38872d61240d1b31b5191814`);
+o `latest.json` assinado oferece a beta.10 às betas 8 e 9.
